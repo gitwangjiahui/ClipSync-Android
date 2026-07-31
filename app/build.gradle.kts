@@ -34,6 +34,18 @@ android {
         buildConfig = true
     }
 
+    // Release 签名：从 local.properties 读取；缺失时不配置（CI 会注入临时 keystore）
+    signingConfigs {
+        if (localProps.getProperty("clipsync.storeFile") != null) {
+            create("release") {
+                storeFile = file(localProps.getProperty("clipsync.storeFile"))
+                storePassword = localProps.getProperty("clipsync.storePassword")
+                keyAlias = localProps.getProperty("clipsync.keyAlias")
+                keyPassword = localProps.getProperty("clipsync.keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -41,6 +53,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (signingConfigs.findByName("release") != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

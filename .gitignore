@@ -37,6 +37,11 @@ captures/
 .externalNativeBuild/
 .cxx/
 
+# 签名密钥（绝对不能进仓库）
+keystore/
+*.jks
+*.keystore
+
 # Android build
 app/build/
 **/build/
