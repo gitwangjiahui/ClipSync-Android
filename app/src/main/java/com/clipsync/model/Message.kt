@@ -1,0 +1,87 @@
+package com.clipsync.model
+
+import kotlinx.serialization.Serializable
+
+/**
+ * 消息类型（传输通道 / 推送范围），跟服务端 TypeXxx 常量一致。
+ * 决定服务端把这条消息投递给同 token 下的哪些客户端。
+ */
+object MessageType {
+    /** 只通知 PC 端（例：短信验证码同步到电脑） */
+    const val NOTIFY_PC = "notify_pc"
+    /** 只通知移动端 */
+    const val NOTIFY_MOBILE = "notify_mobile"
+    /** 通知所有端 */
+    const val NOTIFY_ALL = "notify_all"
+    /** 剪贴板同步（广播；接收方按开关决定是否自动写入本机剪贴板） */
+    const val CLIPBOARD = "clipboard"
+}
+
+/**
+ * MessageCategory：消息业务大类。用于日志与 UI 分组，跟 MessageType（推送通道）解耦。
+ * 三端约定值：sms / clipboard / notification。
+ */
+object MessageCategory {
+    /** 短信（含验证码） */
+    const val SMS = "sms"
+    /** 剪切板（文本、图片、分享） */
+    const val CLIPBOARD = "clipboard"
+    /** 其它通知 */
+    const val NOTIFICATION = "notification"
+
+    /** 根据传输类型 + payload.kind 判定业务大类，与服务端 categorize() 保持一致 */
+    fun of(msgType: String, kind: String?): String {
+        val k = kind.orEmpty()
+        return when {
+            k.startsWith("sms") -> SMS
+            msgType == MessageType.CLIPBOARD || k == "text" || k == "image" || k == "share" -> CLIPBOARD
+            else -> NOTIFICATION
+        }
+    }
+}
+
+/**
+ * MessageContent：内容格式。三端约定值：text / image。
+ */
+object MessageContent {
+    const val TEXT = "text"
+    const val IMAGE = "image"
+
+    /** 根据 payload.kind + payload.mime 判定内容格式，与服务端 contentTypeOf() 保持一致 */
+    fun of(kind: String?, mime: String?): String {
+        val k = kind.orEmpty()
+        val m = mime.orEmpty()
+        return if (k == IMAGE || m.startsWith("image/")) IMAGE else TEXT
+    }
+}
+
+/** 客户端角色 */
+object ClientRole {
+    const val PC = "pc"
+    const val MOBILE = "mobile"
+}
+
+@Serializable
+data class MessagePayload(
+    val text: String? = null,
+    val mime: String? = null,
+    val data: String? = null,      // base64（图片等二进制）
+    val preview: String? = null,   // 短预览
+    val kind: String? = null       // 业务子类型：sms_code / text / image / share ...
+)
+
+@Serializable
+data class Message(
+    val id: String,
+    val type: String,              // MessageType.*
+    val from: String,
+    val to: String = "*",
+    val ts: Long,
+    val payload: MessagePayload
+) {
+    /** 便捷：直接算出业务大类 */
+    val category: String get() = MessageCategory.of(type, payload.kind)
+
+    /** 便捷：直接算出内容格式 */
+    val content: String get() = MessageContent.of(payload.kind, payload.mime)
+}

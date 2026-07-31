@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ClipSync</string>
+    <string name="accessibility_summary">保持后台剪贴板双向同步</string>
+    <string name="accessibility_description">开启后 ClipSync 才能在后台读写剪贴板，把本机复制的内容广播到其他设备，并把远端复制的内容自动写入本机。仅用于剪贴板操作，不会记录界面内容。</string>
+</resources>

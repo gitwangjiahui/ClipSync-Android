@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    ClipSync 无障碍服务配置。
+    目的：绕开 Android 10+ / MIUI「后台不允许读写剪贴板」的限制。
+    canRetrieveWindowContent 必须设为 true，否则 MIUI 不会真正启动服务。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeAllMask"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagReportViewIds"
+    android:canRetrieveWindowContent="true"
+    android:notificationTimeout="100"
+    android:description="@string/accessibility_description"
+    android:summary="@string/accessibility_summary" />
