@@ -1,0 +1,144 @@
+name: Release APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      versionName:
+        description: 'versionName (例如 1.0.0)'
+        required: true
+        default: '1.0.0'
+      versionCode:
+        description: 'versionCode (整数)'
+        required: true
+        default: '1'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build APK (${{ matrix.abi }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: universal
+            abiFilter: ''
+        # 如需分架构包，把下面三行取消注释，并把上面的 abiFilter 改成 'armeabi-v7a' 等
+        # - abi: arm64-v8a
+        #   abiFilter: arm64-v8a
+        # - abi: x86_64
+        #   abiFilter: x86_64
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: 缓存 Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: 准备 local.properties（无敏感信息）
+        run: |
+          cat > local.properties <<'EOF'
+          sdk.dir=$ANDROID_HOME
+          clipsync.server=ws://192.168.1.1:8080
+          clipsync.token=
+          EOF
+
+      - name: 注入 versionName / versionCode
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          VERSION_NAME="${{ github.event.inputs.versionName }}"
+          VERSION_CODE="${{ github.event.inputs.versionCode }}"
+          sed -i "s/versionName = \".*\"/versionName = \"$VERSION_NAME\"/" app/build.gradle.kts
+          sed -i "s/versionCode = .*/versionCode = $VERSION_CODE/" app/build.gradle.kts
+          echo "已设置 versionName=$VERSION_NAME versionCode=$VERSION_CODE"
+
+      - name: 提取 tag 版本号
+        if: startsWith(github.ref, 'refs/tags/')
+        id: tag
+        run: |
+          TAG=${GITHUB_REF#refs/tags/v}
+          echo "VERSION_NAME=$TAG" >> $GITHUB_OUTPUT
+          echo "VERSION_CODE=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: 注入 tag 版本号
+        if: steps.tag.outputs.VERSION_NAME
+        run: |
+          sed -i "s/versionName = \".*\"/versionName = \"${{ steps.tag.outputs.VERSION_NAME }}\"/" app/build.gradle.kts
+          sed -i "s/versionCode = .*/versionCode = ${{ steps.tag.outputs.VERSION_CODE }}/" app/build.gradle.kts
+          echo "已设置 versionName=${{ steps.tag.outputs.VERSION_NAME }} versionCode=${{ steps.tag.outputs.VERSION_CODE }}"
+
+      - name: 构建 Release APK
+        run: ./gradlew :app:assembleRelease
+
+      - name: 收集 APK
+        id: collect
+        run: |
+          mkdir -p artifacts
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)
+          if [ -z "$APK" ]; then
+            echo "❌ 没找到 APK"
+            exit 1
+          fi
+          BASENAME=$(basename "$APK" .apk)
+          TARGET="artifacts/ClipSync-${BASENAME}.apk"
+          cp "$APK" "$TARGET"
+          echo "APK_PATH=$TARGET" >> $GITHUB_OUTPUT
+          echo "📦 已生成 $TARGET ($(du -h "$TARGET" | cut -f1))"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: clip-sync-apk
+          path: ${{ steps.collect.outputs.APK_PATH }}
+          if-no-files-found: error
+
+  release:
+    name: 创建 GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载所有架构 APK
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 读取版本号
+        id: ver
+        run: |
+          TAG=${GITHUB_REF#refs/tags/v}
+          echo "VERSION=$TAG" >> $GITHUB_OUTPUT
+
+      - name: 校验 APK 存在
+        run: |
+          ls -la dist/ || true
+          test -n "$(find dist -name '*.apk' -print -quit)" || (echo "❌ 没拿到 APK" && exit 1)
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: 'ClipSync v${{ steps.ver.outputs.VERSION }}'
+          generate_release_notes: true
+          files: |
+            dist/**/*.apk
