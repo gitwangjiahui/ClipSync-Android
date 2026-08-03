@@ -216,6 +216,8 @@ jobs:
           LABEL org.opencontainers.image.title="ClipSync Android APK"
           LABEL org.opencontainers.image.description="ClipSync Android 安装包（OCI 容器包形式分发，apk 在 /app/ 与 /scratch/）"
           LABEL com.clipsync.role="android-apk"
+          LABEL org.opencontainers.image.source="https://github.com/${{ github.repository }}"
+          LABEL org.opencontainers.image.url="https://github.com/${{ github.repository }}"
           COPY app/ /app/
           COPY scratch/ /scratch/
           EOF
