@@ -63,9 +63,12 @@ jobs:
           EOF
 
       - name: 注入签名配置（仓库 Secrets 存在时）
-        if: ${{ secrets.ANDROID_KEYSTORE_B64 != '' }}
+        # secrets 上下文不能直接用在 if 里，先用 env 中转
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        if: ${{ env.KS_B64 != '' }}
         run: |
-          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > /tmp/clipsync-release.jks
+          echo "$KS_B64" | base64 -d > /tmp/clipsync-release.jks
           cat >> local.properties <<EOF
           clipsync.storeFile=/tmp/clipsync-release.jks
           clipsync.storePassword=${{ secrets.ANDROID_STORE_PASSWORD }}
