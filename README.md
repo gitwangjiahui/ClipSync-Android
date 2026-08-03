@@ -4,145 +4,142 @@
 
 # ClipSync-Android
 
-Android 客户端：监听短信验证码 + 分享菜单推送剪贴板/图片 → 上传到 ClipSync-Server。
+<p align="center">
+  <b>ClipSync 三端同步体系的 Android 客户端</b><br/>
+  自动监听短信验证码、监控剪贴板、分享菜单推送文本/图片，实时同步到你的电脑。<br/>
+  Kotlin + 前台服务 + 无障碍服务，针对国产 ROM 后台保活深度适配。
+</p>
+
+<p align="center">
+  <a href="https://github.com/gitwangjiahui/ClipSync-Android/releases">⬇️ 下载 APK</a> ·
+  <a href="https://github.com/orgs/gitwangjiahui/packages">📦 Packages (ghcr.io)</a> ·
+  <a href="https://github.com/gitwangjiahui/ClipSync-Server">🖧 服务端</a> ·
+  <a href="https://github.com/gitwangjiahui/ClipSync-Mac">🖥️ Mac 端</a>
+</p>
 
 ---
 
-## 一、准备环境（一次性）
+## 一、它能干什么
+
+| 能力 | 说明 | 实现方式 |
+|---|---|---|
+| **短信验证码同步** | 收到验证码短信自动识别 4-8 位数字并推给电脑 | `SmsReceiver` 广播 + `NotificationSmsListener` 通知监听（绕 MIUI 拦截） |
+| **剪贴板自动同步** | 手机复制文本/图片 → 电脑收到并可自动写入剪贴板 | 无障碍服务后台读剪贴板（绕 Android 10+ 限制） |
+| **分享菜单推送** | 任意 App 长按选中文字/图片 → 分享 → 选 ClipSync | `ShareActivity`（独立 task，推完回到来源 App） |
+| **历史记录** | 本地保存推送过的内容，可回看 | `HistoryActivity` + 本地存储 |
+| **开机自启** | 重启/升级后自动恢复同步服务 | `BootReceiver` |
+| **后台保活** | 前台常驻通知 + 申请忽略电池优化 | `SyncService`(foregroundServiceType=dataSync) |
+
+## 二、下载与安装
+
+到 [Releases](https://github.com/gitwangjiahui/ClipSync-Android/releases) 下载 `ClipSync-vX.Y.Z-release.apk`（已签名，v2 签名方案）。
+
+1. 传到手机打开安装（首次需开启「允许安装未知来源应用」）
+2. 打开 App → 设置里填 **服务器地址**（如 `ws://192.168.1.100:8080`）和 **Token**（与电脑端一致即自动配对）
+3. 按引导授予权限（见下节）→ 点「启动同步服务」→ 通知栏出现常驻通知即成功
+
+### 权限清单及用途
+
+| 权限 | 用途 |
+|---|---|
+| 短信（RECEIVE/READ_SMS） | 监听验证码 |
+| 通知使用权 | MIUI 等拦截短信广播时的兜底读取通道 |
+| 无障碍服务 | 后台读写剪贴板（Android 10+ 限制下的合规绕法） |
+| 前台服务/唤醒锁 | 后台保活 |
+| 忽略电池优化 | 防国产 ROM 杀后台 |
+| 读媒体库 | 截图/图片剪贴板同步 |
+
+## 三、消息协议（与服务端约定）
+
+```json
+{ "type": "notify_pc", "kind": "sms_code", "text": "【某银行】验证码 314159" }
+```
+
+- `notify_pc`：只发给 PC 端（验证码场景）
+- `clipboard`：广播所有端，接收方按各自开关决定是否写入剪贴板
+- 同 token 设备自动成组；服务端不存数据
+
+## 四、开发环境搭建
 
 ### 1. 装 Android Studio
 
-下载：https://developer.android.com/studio
+https://developer.android.com/studio ，首次打开引导装 SDK（API 34）。
 
-装好后首次打开会引导安装 Android SDK（选 API 34 就行）。
-
-### 2. 设置环境变量（命令行打包才需要）
-
-在你的 `~/.zshrc` 或 `~/.bash_profile` 里加：
+### 2. 命令行环境变量
 
 ```bash
 export ANDROID_HOME=$HOME/Library/Android/sdk
 export PATH=$PATH:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator
+source ~/.zshrc
 ```
 
-然后 `source ~/.zshrc` 生效。
+### 3. 真机调试
 
-### 3. 手机开启 USB 调试
+设置 → 关于本机 → 连点版本号 7 次 → 开发者选项 → USB 调试 → 数据线连电脑选「文件传输」。
 
-- 系统设置 → 关于本机 → **连点「版本号」7 次** 打开开发者模式
-- 开发者选项 → 打开 **USB 调试**
-- 用数据线连电脑，选「文件传输」模式
+### 4. 运行
 
----
+Android Studio Open 本目录 → Gradle Sync → 选设备 → ▶️（Shift+F10）。
+或命令行：`./gradlew installDebug`。
 
-## 二、运行（推荐用 Android Studio）
+## 五、打包
 
-1. 打开 Android Studio
-2. **Open** → 选择本目录 `ClipSync-Android/`
-3. 等待 Gradle Sync 完成（首次会下依赖，可能要几分钟）
-4. 顶部选中你的设备（真机或模拟器）
-5. 点绿色 ▶️ 或 **Shift+F10** 运行
-
-首次运行需要手动授予**短信权限**和**通知权限**：
-- 系统设置 → 应用 → ClipSync → 权限 → 全部允许
-
----
-
-## 三、命令行打包（打 APK 用）
-
-在项目根目录（`ClipSync-Android/`）：
-
-### Debug APK（不用签名，自用最方便）
+### Debug 包（自用）
 
 ```bash
 ./gradlew assembleDebug
+# 产物：app/build/outputs/apk/debug/app-debug.apk
 ```
 
-生成的 APK 位置：
+### Release 签名包（分发）
 
+签名配置从 `local.properties` 读取（该文件已 gitignore，**密钥不进仓库**）：
+
+```properties
+clipsync.storeFile=../keystore/release.jks
+clipsync.storePassword=***
+clipsync.keyAlias=clipsync
+clipsync.keyPassword=***
 ```
-app/build/outputs/apk/debug/app-debug.apk
-```
-
-直接把这个文件拷到手机，点开安装即可。
-
-### Release APK（需要签名，正式分发用）
-
-第 1 步：生成签名 keystore（一次性）
-
-```bash
-keytool -genkey -v -keystore clipsync.keystore \
-        -keyalg RSA -keysize 2048 -validity 10000 \
-        -alias clipsync
-```
-
-按提示填口令、姓名等。
-
-第 2 步：修改 `app/build.gradle.kts`，在 `android { }` 里加：
-
-```kotlin
-signingConfigs {
-    create("release") {
-        storeFile = file("../clipsync.keystore")
-        storePassword = "你的口令"
-        keyAlias = "clipsync"
-        keyPassword = "你的口令"
-    }
-}
-buildTypes {
-    release {
-        signingConfig = signingConfigs.getByName("release")
-        isMinifyEnabled = false
-    }
-}
-```
-
-第 3 步：打 release 包
 
 ```bash
 ./gradlew assembleRelease
+# 产物：app/build/outputs/apk/release/app-release.apk（自动签名）
 ```
 
-产物在 `app/build/outputs/apk/release/app-release.apk`。
+没有 keystore 时 `signingConfigs` 不创建，打出来是未签名包（装不上，仅 CI 兜底）。
 
----
+### CI 自动打包（推荐）
 
-## 四、直接把 APK 装到已连接的手机
+打 tag 即自动构建签名包并发 Release + 推容器包：
 
 ```bash
-./gradlew installDebug
-# 或者用 adb 手动装
-adb install app/build/outputs/apk/debug/app-debug.apk
+git tag v1.2.0 && git push origin v1.2.0
 ```
 
----
+签名密钥以 base64 存在仓库 Secrets（`ANDROID_KEYSTORE_B64` 等四个），workflow 自动注入，本地无需任何配置。
 
-## 五、首次没有 gradlew 怎么办？
+## 六、项目结构
 
-用 Android Studio 打开项目一次即可（会自动生成 `gradlew` 和 `gradle/wrapper/` 目录）。或者手动执行：
-
-```bash
-gradle wrapper --gradle-version 8.7
 ```
-
-前提本地已装 Gradle。
-
----
-
-## 六、使用说明
-
-1. 打开 App → 填服务器地址（如 `ws://192.168.11.234:8080`）和 Token
-2. 点「启动同步服务」→ 通知栏出现常驻通知说明后台在跑
-3. **验证码**：自动监听短信里 4-8 位数字，识别后推送
-4. **手动分享**：任意 App 里长按选中文字 / 图片 → 分享 → 选 **ClipSync**
-
----
+app/src/main/java/...
+├── MainActivity.kt              # 主页：连接状态、启停服务
+├── clip/ShareActivity.kt        # 分享菜单入口
+├── clipboard/ClipReaderActivity.kt  # MIUI 读剪贴板兜底（透明一帧）
+├── sms/SmsReceiver.kt           # 短信广播接收
+├── sms/NotificationSmsListener.kt   # 通知监听兜底
+├── accessibility/ClipSyncAccessibilityService.kt  # 后台剪贴板
+├── service/SyncService.kt       # 前台常驻同步服务（WS 客户端宿主）
+├── service/BootReceiver.kt      # 开机自启
+└── ui/                          # 设置/功能设置/权限设置/历史
+```
 
 ## 七、常见问题
 
 | 问题 | 解决 |
-|------|------|
-| 收不到验证码 | 系统设置授予短信权限；关闭对该 App 的电池优化 |
-| 后台被杀 | 系统设置里锁定该 App 或加白名单 |
-| 连不上服务端 | 检查服务器地址和 token；手机和电脑同一 WiFi；防火墙放行 8080 |
-| 分享菜单没有 ClipSync | 重启系统或重装 App |
+|---|---|
+| 收不到验证码 | 授予短信权限 + 通知使用权；关电池优化 |
+| 剪贴板不同步 | 开启无障碍服务「ClipSync 剪贴板同步」 |
+| 后台被杀 | 锁定 App / 加白名单 / 允许自启动 |
+| 连不上服务端 | 同 WiFi；防火墙放行 8080；地址用 `ws://IP:8080` |
+| 分享菜单没有 ClipSync | 重启系统或重装 |
