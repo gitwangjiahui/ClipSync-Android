@@ -54,6 +54,15 @@ class FuncSettingsActivity : AppCompatActivity() {
         tokenEdit.addTextChangedListener(persistWatcher(sp, "token"))
         connCard.addView(serverEdit, marginParams(16))
         connCard.addView(tokenEdit, marginParams(8))
+
+        val autoConnectCb = CheckBox(this).apply {
+            text = "启动时自动连接并开始同步"
+            isChecked = sp.getBoolean("auto_connect", true)
+            setOnCheckedChangeListener { _, checked ->
+                sp.edit().putBoolean("auto_connect", checked).apply()
+            }
+        }
+        connCard.addView(autoConnectCb)
         container.addView(connCard, cardParams())
 
         // ====== 卡片：剪贴板同步 ======
@@ -70,7 +79,7 @@ class FuncSettingsActivity : AppCompatActivity() {
             }
         }
         val uploadCb = CheckBox(this).apply {
-            text = "上传本机剪贴板到其他设备"
+            text = "自动推送剪贴板到电脑（关闭后只能手动点「推送剪切板」）"
             isChecked = ClipboardManagerHelper.uploadEnabled
             setOnCheckedChangeListener { _, checked ->
                 ClipboardManagerHelper.uploadEnabled = checked

@@ -3,125 +3,142 @@ package com.clipsync
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.Menu
 import android.view.MenuItem
+import android.view.View
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.util.Log
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import com.clipsync.clipboard.ClipboardManagerHelper
 import com.clipsync.service.SyncService
 import com.clipsync.state.ConnectionBus
 import com.clipsync.ui.HistoryActivity
 import com.clipsync.ui.SettingsActivity
 
 /**
- * 主界面：只显示连接状态 + 操作按钮 + 历史记录入口。
- * - 右上角齿轮 → 设置
- * - 底部"历史记录"按钮 → HistoryActivity（内部筛选短信/剪贴板）
+ * 主界面（重设计样式）
+ * - 顶部：大号状态卡（图标 + 状态文字 + 服务器地址 + 启动/停止按钮）
+ * - 中间：剪贴板预览 + 手动推送（保留原"当前剪贴板"功能）
+ * - 底部：历史按钮
+ * - 右上角齿轮 → 设置（恢复原入口）
  */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var statusDot: TextView
     private lateinit var statusText: TextView
     private lateinit var statusHint: TextView
+    private lateinit var statusBadge: LinearLayout
     private lateinit var toggleBtn: Button
     private lateinit var targetText: TextView
+    private lateinit var clipPreviewText: TextView
+    private lateinit var clipPreviewImage: ImageView
+    private lateinit var clipCard: LinearLayout
+    private lateinit var pushBtn: Button
 
     private var dotAnimator: ObjectAnimator? = null
     private var lastWasConnecting = false
 
     private val stateListener: (String) -> Unit = { state -> renderState(state) }
+    private val previewListener: () -> Unit = { refreshClipPreview() }
+
+    private val mediaPermLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        android.util.Log.i("ClipSync", "图片权限授权结果: $granted")
+        refreshClipPreview()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         title = "ClipSync"
+        ClipboardManagerHelper.loadPrefs(this)
+        // 重要：先初始化 ClipboardManagerHelper，否则主页预览拿不到剪贴板
+        // （之前依赖 SyncService 启动，但预览要在服务启动前就能用）
+        ClipboardManagerHelper.init(applicationContext, null)
+        requestMediaPermissionIfNeeded()
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(64, 96, 64, 64)
+            setPadding(24, 32, 24, 24)
+            setBackgroundColor(0xFFF6F7FB.toInt())
         }
 
-        // 大字号连接状态
-        statusDot = TextView(this).apply {
-            text = "●"
-            textSize = 42f
-            setPadding(0, 0, 0, 8)
-        }
-        statusText = TextView(this).apply {
-            text = "未连接"
-            textSize = 22f
-            setPadding(0, 0, 0, 6)
-        }
-        statusHint = TextView(this).apply {
-            text = " "
-            textSize = 13f
-            setTextColor(0xFF888888.toInt())
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, 48)
-        }
-        root.addView(statusDot, centerParams())
-        root.addView(statusText, centerParams())
-        root.addView(statusHint, centerParams())
-
-        // 连接目标（服务器地址）—— 圆角卡片，居中，图标 + 链接文本
-        targetText = TextView(this).apply {
-            textSize = 13f
-            setTextColor(0xFF374151.toInt())
-            gravity = Gravity.CENTER
-            val bg = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = 20f
-                setColor(0xFFF3F4F6.toInt())
-            }
-            background = bg
-            setPadding(28, 16, 28, 16)
-        }
-        renderTarget()
-        root.addView(targetText, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT,
+        root.addView(buildStatusCard(), LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            gravity = Gravity.CENTER_HORIZONTAL
-            bottomMargin = 32
-        })
+        ))
 
-        // 启动/停止 二合一按钮
-        toggleBtn = styledButton("启动同步服务", 0xFF22C55E.toInt(), 0xFFFFFFFF.toInt()) { toggleSync() }
-        root.addView(toggleBtn, buttonParams())
+        // "立即推送"按钮放在状态卡下面，剪贴板预览之上
+        pushBtn = styledButton("推送剪切板", 0xFF6366F1.toInt(), 0xFFFFFFFF.toInt()) { pushClipboard() }
+        root.addView(pushBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = 16 })
 
-        // 历史记录按钮 — 蓝色
-        val historyBtn = styledButton("历史记录", 0xFF3B82F6.toInt(), 0xFFFFFFFF.toInt()) {
-            startActivity(Intent(this@MainActivity, HistoryActivity::class.java))
-        }
-        root.addView(historyBtn, buttonParams())
+        // 剪贴板预览卡（自由高度，内容自适应）
+        root.addView(buildClipCard(), LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = 16 })
 
         setContentView(root)
     }
 
-    /** 创建带圆角背景的彩色按钮 */
-    private fun styledButton(text: String, bgColor: Int, textColor: Int, onClick: () -> Unit): Button {
-        val drawable = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = 24f
-            setColor(bgColor)
+    override fun onResume() {
+        super.onResume()
+        ConnectionBus.addListener(stateListener)
+        renderTarget()
+        com.clipsync.clipboard.ClipboardManagerHelper.onForeground()
+        // 服务被系统杀过就拉起来；没杀则 kick 立即重连
+        if (com.clipsync.service.SyncService.activeWs() == null) {
+            startSync()
+        } else {
+            com.clipsync.service.SyncService.kick()
         }
-        return Button(this).apply {
-            this.text = text
-            setTextColor(textColor)
-            background = drawable
-            setPadding(0, 36, 0, 36)
-            textSize = 15f
-            setOnClickListener { onClick() }
+        ClipboardManagerHelper.addPreviewListener(previewListener)
+        // 第一次预览（窗口未获焦点，可能读不到内容，下面 onWindowFocusChanged 会再读）
+        refreshClipPreview()
+        // 兜底：onWindowFocusChanged 在某些 ROM 上不会触发，所以延迟再读几次
+        clipCard.postDelayed({ refreshClipPreview() }, 300)
+        clipCard.postDelayed({ refreshClipPreview() }, 800)
+        clipCard.postDelayed({ refreshClipPreview() }, 1500)
+        renderState(ConnectionBus.current)
+        autoConnectIfNeeded()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        android.util.Log.i("ClipSync", "onWindowFocusChanged: hasFocus=$hasFocus")
+        if (hasFocus) {
+            // 关键：Android 10+ 后台无法读剪贴板内容，必须等窗口真正获焦点后再读。
+            // 多数 ROM 还需要再延迟一帧（MIUI 更严格）
+            clipCard.postDelayed({ refreshClipPreview() }, 150)
         }
     }
 
+    override fun onPause() {
+        super.onPause()
+        ClipboardManagerHelper.removePreviewListener(previewListener)
+        ConnectionBus.removeListener(stateListener)
+        stopDotAnimation()
+    }
+
     override fun onCreateOptionsMenu(menu: Menu?): Boolean {
+        menu?.add(0, 200, 0, "历史")?.apply {
+            setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+            setIcon(android.R.drawable.ic_menu_recent_history)
+        }
         menu?.add(0, 100, 0, "设置")?.apply {
             setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
             setIcon(android.R.drawable.ic_menu_manage)
@@ -135,59 +152,230 @@ class MainActivity : AppCompatActivity() {
                 startActivity(Intent(this, SettingsActivity::class.java))
                 true
             }
+            200 -> {
+                startActivity(Intent(this, HistoryActivity::class.java))
+                true
+            }
             else -> super.onOptionsItemSelected(item)
         }
     }
 
-    override fun onResume() {
-        super.onResume()
-        ConnectionBus.addListener(stateListener)
-        // 每次回到主界面刷新一下"连接目标"，用户改完设置回来能立即看到新地址
+    // MARK: - 状态卡（重设计：背景随状态变色，大号圆点 + 状态文字 + 服务器地址 + 启动按钮）
+
+    private fun buildStatusCard(): View {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = roundedBg(0xFFFFFFFF.toInt(), 28f)
+            setPadding(22, 20, 22, 20)
+            elevation = 8f
+        }
+
+        // 大号圆形状态徽章（背景色随状态变化）
+        val badgeSize = 56
+        statusBadge = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = roundedBg(0xFFEEF2FF.toInt(), badgeSize / 2f)
+            layoutParams = LinearLayout.LayoutParams(badgeSize, badgeSize)
+        }
+        statusDot = TextView(this).apply {
+            text = "●"
+            textSize = 22f
+            setTextColor(0xFF9CA3AF.toInt())
+        }
+        statusBadge.addView(statusDot)
+        card.addView(statusBadge, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { rightMargin = 16 })
+
+        // 中间文字区（状态文字 + 服务器地址）
+        val textCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        statusText = TextView(this).apply {
+            text = "未连接"
+            textSize = 20f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTextColor(0xFF1F2937.toInt())
+        }
+        statusHint = TextView(this).apply {
+            text = " "
+            textSize = 12f
+            setTextColor(0xFF9CA3AF.toInt())
+            setPadding(0, 2, 0, 0)
+        }
+        // 服务器地址（带左侧小色条）
+        val targetRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 8, 0, 0)
+        }
+        val targetBar = View(this).apply {
+            background = roundedBg(0xFF6366F1.toInt(), 2f)
+            layoutParams = LinearLayout.LayoutParams(3, 14)
+        }
+        targetText = TextView(this).apply {
+            textSize = 11f
+            setTextColor(0xFF6B7280.toInt())
+            typeface = android.graphics.Typeface.MONOSPACE
+            setPadding(8, 0, 0, 0)
+            maxLines = 1
+        }
+        targetRow.addView(targetBar)
+        targetRow.addView(targetText, LinearLayout.LayoutParams(
+            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+        ))
+        textCol.addView(statusText)
+        textCol.addView(statusHint)
+        textCol.addView(targetRow)
+        card.addView(textCol, LinearLayout.LayoutParams(
+            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+        ))
+
+        // 右侧启动/停止按钮
+        toggleBtn = styledButton("启动", 0xFF22C55E.toInt(), 0xFFFFFFFF.toInt()) { toggleSync() }
+        val btnParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { leftMargin = 12 }
+        card.addView(toggleBtn, btnParams)
+
         renderTarget()
-        // 切回前台时：重新注册剪贴板监听 + 立即读取一次并上传。
-        // 这样用户"别的 App 复制 → 切回 ClipSync"就能自动推送，无需无障碍权限。
-        com.clipsync.clipboard.ClipboardManagerHelper.onForeground()
+        return card
     }
 
-    override fun onPause() {
-        super.onPause()
-        ConnectionBus.removeListener(stateListener)
-        stopDotAnimation()
+    // MARK: - 剪贴板预览卡（占满中间）
+
+    private fun buildClipCard(): View {
+        clipCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundedBg(0xFFFFFFFF.toInt(), 24f)
+            setPadding(24, 20, 24, 20)
+            elevation = 6f
+        }
+
+        // 标题行：左侧色条 + "当前剪贴板"
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 12)
+        }
+        val titleBar = View(this).apply {
+            background = roundedBg(0xFF6366F1.toInt(), 3f)
+            layoutParams = LinearLayout.LayoutParams(5, 20)
+        }
+        val title = TextView(this).apply {
+            text = "当前剪贴板"
+            textSize = 15f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTextColor(0xFF1F2937.toInt())
+            setPadding(10, 0, 0, 0)
+        }
+        titleRow.addView(titleBar)
+        titleRow.addView(title)
+        clipCard.addView(titleRow)
+
+        // 内容区（自由高度，文本/图片按内容自适应）
+        val contentFrame = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            background = roundedBg(0xFFF9FAFB.toInt(), 16f)
+            setPadding(20, 16, 20, 16)
+        }
+        clipPreviewText = TextView(this).apply {
+            textSize = 14f
+            setTextColor(0xFF374151.toInt())
+            setLineSpacing(0f, 1.5f)
+            gravity = Gravity.TOP
+            visibility = View.GONE
+        }
+        clipPreviewImage = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            visibility = View.GONE
+            background = roundedBg(0xFFF3F4F6.toInt(), 12f)
+        }
+        contentFrame.addView(clipPreviewText, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ))
+        contentFrame.addView(clipPreviewImage, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ))
+        clipCard.addView(contentFrame)
+
+        return clipCard
     }
+
+    // MARK: - 状态渲染
 
     private fun renderState(state: String) {
+        if (!::statusDot.isInitialized || !::statusText.isInitialized ||
+            !::statusHint.isInitialized || !::statusBadge.isInitialized ||
+            !::toggleBtn.isInitialized
+        ) {
+            return
+        }
         when (state) {
             ConnectionBus.STATE_OPEN -> {
                 stopDotAnimation()
                 statusDot.setTextColor(0xFF22C55E.toInt())
+                (statusBadge.background as? GradientDrawable)?.setColor(0xFFDCFCE7.toInt())
                 statusText.text = "已连接"
                 statusHint.text = "同步中，可正常收发消息"
-                updateToggleBtn(ConnectionBus.STATE_OPEN)
+                toggleBtn.text = "停止"
+                (toggleBtn.background as? GradientDrawable)?.setColor(0xFFEF4444.toInt())
+                toggleBtn.isEnabled = true
+                // 已连接成功，清掉"曾在连接中"标记，避免之后正常断开也弹失败
+                lastWasConnecting = false
+                return
             }
             ConnectionBus.STATE_CONNECTING -> {
                 startDotAnimation()
                 statusDot.setTextColor(0xFFF59E0B.toInt())
+                (statusBadge.background as? GradientDrawable)?.setColor(0xFFFEF3C7.toInt())
                 statusText.text = "连接中"
                 statusHint.text = "正在连接服务器…"
-                updateToggleBtn(ConnectionBus.STATE_CONNECTING)
+                toggleBtn.text = "取消"
+                (toggleBtn.background as? GradientDrawable)?.setColor(0xFFEF4444.toInt())
+                toggleBtn.isEnabled = true
+                lastWasConnecting = true
+                return
             }
             else -> {
-                stopDotAnimation()
-                statusDot.setTextColor(0xFF9CA3AF.toInt())
-                statusText.text = "未连接"
-                if (lastWasConnecting) {
-                    statusHint.text = "连接失败，请检查网络或服务器后再次启动"
-                    Toast.makeText(this, "连接失败", Toast.LENGTH_SHORT).show()
+                // 服务还活着 = 只是瞬时断线，内部在自动重连，不报失败
+                val serviceAlive = com.clipsync.service.SyncService.activeWs() != null
+                if (serviceAlive) {
+                    startDotAnimation()
+                    statusDot.setTextColor(0xFFF59E0B.toInt())
+                    (statusBadge.background as? GradientDrawable)?.setColor(0xFFFEF3C7.toInt())
+                    statusText.text = "重连中"
+                    statusHint.text = "连接中断，正在自动重连…"
+                    toggleBtn.text = "取消"
+                    (toggleBtn.background as? GradientDrawable)?.setColor(0xFFEF4444.toInt())
                 } else {
-                    statusHint.text = "请检查网络或到设置里检查配置"
+                    stopDotAnimation()
+                    statusDot.setTextColor(0xFF9CA3AF.toInt())
+                    (statusBadge.background as? GradientDrawable)?.setColor(0xFFEEF2FF.toInt())
+                    statusText.text = "未连接"
+                    statusHint.text = if (lastWasConnecting) {
+                        "连接失败，请检查网络或服务器后再次启动"
+                    } else {
+                        "请检查网络或检查服务器配置"
+                    }
+                    toggleBtn.text = "启动"
+                    (toggleBtn.background as? GradientDrawable)?.setColor(0xFF22C55E.toInt())
                 }
-                updateToggleBtn(ConnectionBus.STATE_CLOSED)
+                toggleBtn.isEnabled = true
+                lastWasConnecting = false
             }
         }
-        lastWasConnecting = (state == ConnectionBus.STATE_CONNECTING)
     }
 
-    /** 从设置读取当前服务器地址并渲染到主界面 */
     private fun renderTarget() {
         val sp = getSharedPreferences("clipsync", MODE_PRIVATE)
         val server = sp.getString("server", null) ?: com.clipsync.BuildConfig.DEFAULT_SERVER
@@ -196,24 +384,150 @@ class MainActivity : AppCompatActivity() {
         targetText.text = "🔗  $server$tokenTip"
     }
 
-    private fun updateToggleBtn(state: String) {
-        when (state) {
-            ConnectionBus.STATE_OPEN -> {
-                toggleBtn.text = "停止同步服务"
-                (toggleBtn.background as? GradientDrawable)?.setColor(0xFFEF4444.toInt())
-                toggleBtn.isEnabled = true
-            }
-            ConnectionBus.STATE_CONNECTING -> {
-                toggleBtn.text = "取消连接"
-                (toggleBtn.background as? GradientDrawable)?.setColor(0xFFEF4444.toInt())
-                toggleBtn.isEnabled = true
-            }
-            else -> {
-                toggleBtn.text = "启动同步服务"
-                (toggleBtn.background as? GradientDrawable)?.setColor(0xFF22C55E.toInt())
-                toggleBtn.isEnabled = true
-            }
+    // MARK: - 剪贴板预览（修复图片显示）
+
+    private fun refreshClipPreview() {
+        val shot = com.clipsync.clipboard.ScreenshotWatcher.peekPending()
+        val shotNewer = shot != null &&
+            com.clipsync.clipboard.ScreenshotWatcher.pendingTimestamp() >=
+            ClipboardManagerHelper.clipTimestamp()
+
+        // 1. 有新截图（比剪贴板新）→ 优先显示截图
+        if (shot != null && shotNewer) {
+            showScreenshot(shot)
+            return
         }
+
+        // 2. 真实剪贴板里的图片
+        val clipImage = ClipboardManagerHelper.peekClipboardImageUri()
+        if (clipImage != null) {
+            val bmp = ClipboardManagerHelper.decodeImageUri(clipImage)
+            if (bmp != null) {
+                clipPreviewImage.setImageBitmap(bmp)
+                clipPreviewImage.visibility = View.VISIBLE
+                clipPreviewText.visibility = View.GONE
+                pushBtn.isEnabled = true
+                pushBtn.alpha = 1f
+                return
+            }
+            android.util.Log.w("ClipSync", "refreshClipPreview: 图片解码失败 uri=$clipImage")
+            clipPreviewImage.visibility = View.GONE
+            clipPreviewText.visibility = View.VISIBLE
+            clipPreviewText.text = "（图片无法预览，但仍可尝试推送）"
+            pushBtn.isEnabled = true
+            pushBtn.alpha = 1f
+            return
+        }
+
+        // 3. 剪贴板文本
+        val text = ClipboardManagerHelper.peekText()
+        if (!text.isNullOrBlank()) {
+            clipPreviewImage.visibility = View.GONE
+            clipPreviewImage.setImageDrawable(null)
+            clipPreviewText.visibility = View.VISIBLE
+            clipPreviewText.text = text
+            pushBtn.isEnabled = true
+            pushBtn.alpha = 1f
+            return
+        }
+
+        // 4. 剪贴板为空 → 回落截图
+        if (shot != null) {
+            showScreenshot(shot)
+            return
+        }
+
+        // 5. 什么都没有
+        clipPreviewImage.visibility = View.GONE
+        clipPreviewImage.setImageDrawable(null)
+        clipPreviewText.visibility = View.VISIBLE
+        clipPreviewText.text = "（剪贴板为空）"
+        pushBtn.isEnabled = false
+        pushBtn.alpha = 0.5f
+    }
+
+    private fun showScreenshot(shot: android.net.Uri) {
+        val bmp = ClipboardManagerHelper.decodeImageUri(shot)
+        if (bmp != null) {
+            clipPreviewImage.setImageBitmap(bmp)
+            clipPreviewImage.visibility = View.VISIBLE
+            clipPreviewText.visibility = View.VISIBLE
+            clipPreviewText.text = "📷 新截图 · 点击推送发送到电脑"
+            pushBtn.isEnabled = true
+            pushBtn.alpha = 1f
+            android.util.Log.i("ClipSync", "refreshClipPreview: 回落截图 $shot")
+        }
+    }
+
+    private fun pushClipboard() {
+        if (!ClipboardManagerHelper.hasContent()) {
+            Toast.makeText(this, "剪贴板为空", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (ConnectionBus.current != ConnectionBus.STATE_OPEN) {
+            Toast.makeText(this, "未连接，请先启动同步", Toast.LENGTH_SHORT).show()
+            return
+        }
+        when (ClipboardManagerHelper.manualUpload()) {
+            com.clipsync.clipboard.ClipboardManagerHelper.UploadResult.SENT ->
+                Toast.makeText(this, "已推送", Toast.LENGTH_SHORT).show()
+            com.clipsync.clipboard.ClipboardManagerHelper.UploadResult.QUEUED ->
+                Toast.makeText(this, "已推送（离线暂存，连上自动发）", Toast.LENGTH_SHORT).show()
+            com.clipsync.clipboard.ClipboardManagerHelper.UploadResult.FAILED ->
+                Toast.makeText(this, "推送失败，请重试", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** 截图监听需要读媒体库权限，首次启动时请求 */
+    private fun requestMediaPermissionIfNeeded() {
+        val perm = if (Build.VERSION.SDK_INT >= 33) {
+            android.Manifest.permission.READ_MEDIA_IMAGES
+        } else {
+            @Suppress("DEPRECATION")
+            android.Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        if (androidx.core.content.ContextCompat.checkSelfPermission(this, perm)
+            != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            mediaPermLauncher.launch(perm)
+        }
+    }
+
+    // MARK: - 启动 / 停止
+
+    private fun toggleSync() {
+        val current = ConnectionBus.current
+        if (current == ConnectionBus.STATE_OPEN || current == ConnectionBus.STATE_CONNECTING) {
+            stopSync()
+        } else {
+            renderState(ConnectionBus.STATE_CONNECTING)
+            startSync()
+        }
+    }
+
+    private fun startSync() {
+        val intent = Intent(this, SyncService::class.java)
+        if (Build.VERSION.SDK_INT >= 26) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+    }
+
+    /** 启动时自动连接（功能设置里可关，默认开） */
+    private fun autoConnectIfNeeded() {
+        val sp = getSharedPreferences("clipsync", MODE_PRIVATE)
+        if (!sp.getBoolean("auto_connect", true)) return
+        val current = ConnectionBus.current
+        if (current == ConnectionBus.STATE_OPEN || current == ConnectionBus.STATE_CONNECTING) return
+        renderState(ConnectionBus.STATE_CONNECTING)
+        startSync()
+    }
+
+    private fun stopSync() {
+        stopService(Intent(this, SyncService::class.java))
+        renderState(ConnectionBus.STATE_CLOSED)
+        lastWasConnecting = false
     }
 
     private fun startDotAnimation() {
@@ -233,40 +547,29 @@ class MainActivity : AppCompatActivity() {
         statusDot.alpha = 1f
     }
 
-    private fun toggleSync() {
-        val current = ConnectionBus.current
-        if (current == ConnectionBus.STATE_OPEN || current == ConnectionBus.STATE_CONNECTING) {
-            stopSync()
-        } else {
-            // 点击后立即切换到"连接中"，给用户即时反馈
-            renderState(ConnectionBus.STATE_CONNECTING)
-            startSync()
+    // MARK: - UI 辅助
+
+    private fun styledButton(text: String, bgColor: Int, textColor: Int, onClick: () -> Unit): Button {
+        val drawable = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = 22f
+            setColor(bgColor)
+        }
+        return Button(this).apply {
+            this.text = text
+            setTextColor(textColor)
+            background = drawable
+            setPadding(28, 24, 28, 24)
+            textSize = 14f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setOnClickListener { onClick() }
         }
     }
 
-    private fun startSync() {
-        val intent = Intent(this, SyncService::class.java)
-        if (android.os.Build.VERSION.SDK_INT >= 26) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
+    private fun roundedBg(color: Int, radius: Float): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = radius
+            setColor(color)
         }
-    }
-
-    private fun stopSync() {
-        stopService(Intent(this, SyncService::class.java))
-        // 立即把 UI 切回未连接，不用等服务 publish CLOSED
-        renderState(ConnectionBus.STATE_CLOSED)
-        lastWasConnecting = false
-    }
-
-    private fun centerParams() = LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.WRAP_CONTENT,
-        LinearLayout.LayoutParams.WRAP_CONTENT
-    ).apply { gravity = Gravity.CENTER_HORIZONTAL }
-
-    private fun buttonParams() = LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.MATCH_PARENT,
-        LinearLayout.LayoutParams.WRAP_CONTENT
-    ).apply { topMargin = 16 }
 }

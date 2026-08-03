@@ -65,6 +65,16 @@ class HistoryActivity : AppCompatActivity() {
         listView.setOnItemClickListener { _, _, position, _ ->
             val item = (listView.adapter as HistoryAdapter).getItem(position)
             val clipboard = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            if (item.kind == "image" && item.imageName.isNotEmpty()) {
+                val ok = com.clipsync.clipboard.ClipboardImageStore
+                    .writeToClipboard(this, item.imageName)
+                Toast.makeText(
+                    this,
+                    if (ok) "图片已复制到剪贴板" else "图片文件已丢失，无法复制",
+                    Toast.LENGTH_SHORT
+                ).show()
+                return@setOnItemClickListener
+            }
             clipboard.setPrimaryClip(
                 android.content.ClipData.newPlainText("ClipSync", item.text)
             )
@@ -139,11 +149,36 @@ class HistoryActivity : AppCompatActivity() {
             val row = (convertView as? LinearLayout) ?: LinearLayout(this@HistoryActivity).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(36, 24, 36, 24)
+                addView(android.widget.ImageView(context).apply {
+                    id = 1003
+                    scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                    adjustViewBounds = true
+                    visibility = View.GONE
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { bottomMargin = 16 }
+                })
                 addView(TextView(context).apply { id = 1001; textSize = 15f; setTextColor(0xFF111111.toInt()) })
                 addView(TextView(context).apply { id = 1002; textSize = 12f; setTextColor(0xFF888888.toInt()) })
             }
             val item = items[position]
-            (row.findViewById<TextView>(1001)).text = item.text
+            val image = row.findViewById<android.widget.ImageView>(1003)
+            val bmp = if (item.kind == "image" && item.imageName.isNotEmpty()) {
+                com.clipsync.clipboard.ClipboardImageStore.loadBitmap(this@HistoryActivity, item.imageName)
+            } else null
+            if (bmp != null) {
+                image.setImageBitmap(bmp)
+                image.visibility = View.VISIBLE
+            } else {
+                image.setImageBitmap(null)
+                image.visibility = View.GONE
+            }
+            val text = when {
+                item.kind == "image" -> if (bmp != null) "图片（点击复制）" else (item.preview.ifEmpty { "[图片]" } + "（点击复制）")
+                else -> item.text
+            }
+            (row.findViewById<TextView>(1001)).text = text
             val dirLabel = if (item.direction == "in") "收到" else "发出"
             val time = DateUtils.getRelativeTimeSpanString(
                 item.ts * 1000, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS

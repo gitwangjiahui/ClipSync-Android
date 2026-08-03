@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 暴露目录：收到/分享的剪贴板图片存这里，
+     通过 content:// URI 写入系统剪贴板，让其他 App 能粘贴。 -->
+<paths>
+    <files-path name="clip_images" path="clip_images/" />
+</paths>

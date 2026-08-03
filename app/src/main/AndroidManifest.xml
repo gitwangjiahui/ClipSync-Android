@@ -11,6 +11,12 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 截图监听需要读媒体库（Android 13+） -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <!-- Android 12 及以下用旧权限 -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <application
         android:allowBackup="true"
@@ -54,10 +60,13 @@
             android:parentActivityName=".MainActivity"
             android:label="历史" />
 
-        <!-- 分享菜单入口：手动推送选中的文本/图片 -->
+        <!-- 分享菜单入口：手动推送选中的文本/图片。
+             独立 task：finish 后回到分享来源 App，而不是 ClipSync 主界面 -->
         <activity
             android:name=".clip.ShareActivity"
             android:exported="true"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
@@ -79,11 +88,13 @@
             android:finishOnTaskLaunch="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
-        <!-- 短信广播接收器 -->
+        <!-- 短信广播接收器
+             注意：不要设置 android:permission="android.permission.BROADCAST_SMS"。
+             BROADCAST_SMS 是发送权限，放在 receiver 上会要求发送方持有该权限，
+             而系统发送 SMS_RECEIVED 时不以该权限身份发送，会导致广播无法触达。 -->
         <receiver
             android:name=".sms.SmsReceiver"
-            android:exported="true"
-            android:permission="android.permission.BROADCAST_SMS">
+            android:exported="true">
             <intent-filter android:priority="1000">
                 <action android:name="android.provider.Telephony.SMS_RECEIVED" />
             </intent-filter>
@@ -120,6 +131,17 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <!-- FileProvider：把收到的剪贴板图片以 content:// URI 写入系统剪贴板 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <!-- 开机 / 更新后自动启动 SyncService -->
         <receiver

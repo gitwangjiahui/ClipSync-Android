@@ -126,6 +126,9 @@ class ClipSyncAccessibilityService : AccessibilityService() {
     fun applyRemoteText(text: String) {
         if (text.isEmpty()) return
         suppressCount += 1
+        // 同时抑制 ClipboardManagerHelper 的监听器，否则它会被本次写入触发并重新上传，
+        // 导致 Mac → Android → Mac 的回环（Mac 收到自己的内容被 echo 回来）。
+        com.clipsync.clipboard.ClipboardManagerHelper.suppressNext()
         try {
             val clip = ClipData.newPlainText("ClipSync", text)
             clipboard.setPrimaryClip(clip)

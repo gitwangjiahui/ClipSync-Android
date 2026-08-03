@@ -47,6 +47,15 @@ class SyncService : Service() {
 
         private const val CHANNEL_ID = "clipsync_fg"
         private const val NOTIFICATION_ID = 1
+
+        @Volatile
+        private var currentWs: WsClient? = null
+
+        /** 当前活跃的 WS 实例（服务没启动时为 null） */
+        fun activeWs(): WsClient? = currentWs
+
+        /** 回前台时调用：让 WS 跳过退避等待立即重连 */
+        fun kick() { currentWs?.kick() }
     }
 
     private var ws: WsClient? = null
@@ -65,6 +74,7 @@ class SyncService : Service() {
         Log.i("ClipSync", "🟢 同步服务已启动")
         startForeground(buildNotification(ConnectionBus.STATE_CONNECTING))
         acquireWakeLock()
+        com.clipsync.clipboard.ScreenshotWatcher.start(this)
         connectWs()
     }
 
@@ -100,10 +110,10 @@ class SyncService : Service() {
         val deviceID = UUID.randomUUID().toString()
         val wsClient = WsClient(server, token, deviceID).also { it.start() }
         ws = wsClient
+        currentWs = wsClient
 
-        ClipboardManagerHelper.init(applicationContext, wsClient)
-        // 服务启动时注册剪贴板监听，但**不主动读一次**：
-        // 服务启动瞬间读到的往往是之前就复制过的旧内容，会造成"点一次启动就推送一次"的错觉。
+        // 绑定 ws 客户端，但不要重复 init（MainActivity 已经初始化过 clipboardManager）
+        ClipboardManagerHelper.bindWs(wsClient)
         ClipboardManagerHelper.startListening()
         ClipSyncAccessibilityService.wsClient = wsClient
 
@@ -115,7 +125,17 @@ class SyncService : Service() {
     private fun subscribeState(wsClient: WsClient) {
         stateJob?.cancel()
         stateJob = serviceScope.launch {
+            // StateFlow 会立即发射当前值（初始为 CLOSED），
+            // 这会让 UI 误判"连接失败"。用 dropWhile 跳过首个 CLOSED。
+            var seenNonClosed = false
             wsClient.state.collect { s ->
+                if (!seenNonClosed) {
+                    if (s == WsClient.State.CLOSED) {
+                        // 还没进入 CONNECTING/OPEN 前的 CLOSED 都是初始值，忽略
+                        return@collect
+                    }
+                    seenNonClosed = true
+                }
                 val state = when (s) {
                     WsClient.State.OPEN -> ConnectionBus.STATE_OPEN
                     WsClient.State.CONNECTING -> ConnectionBus.STATE_CONNECTING
@@ -126,12 +146,8 @@ class SyncService : Service() {
                 val nm = getSystemService(NotificationManager::class.java)
                 nm?.notify(NOTIFICATION_ID, buildNotification(state))
 
-                // 连接失败/断开 → 自动停服，不做重连；用户在主界面再点一次才会重连。
-                // 注意：先从 CONNECTING/OPEN 变为 CLOSED 才停，避免服务刚启动就被停掉。
-                if (s == WsClient.State.CLOSED && hasBeenConnectingOrOpen) {
-                    Log.i("ClipSync", "⚪ 连接已结束，自动停止同步服务")
-                    stopSelf()
-                }
+                // 断线不杀服务：WsClient 内部有指数退避自动重连，
+                // 回前台时 MainActivity 会 kick 加速重连
                 if (s == WsClient.State.CONNECTING || s == WsClient.State.OPEN) {
                     hasBeenConnectingOrOpen = true
                 }
@@ -164,20 +180,56 @@ class SyncService : Service() {
             msg.type == "clipboard_image"
 
         if (isImage) {
-            val preview = msg.payload.preview ?: "[图片]"
-            Log.i("ClipSync", "↓ 收到图片")
+            val data = msg.payload.data
+            if (data.isNullOrEmpty()) {
+                Log.w("ClipSync", "↓ 收到图片但 data 为空，跳过")
+                return
+            }
+            Log.i("ClipSync", "↓ 收到图片 (${data.length / 1024}KB base64)")
+            val fileName = com.clipsync.clipboard.ClipboardImageStore.saveBase64(
+                this, data, msg.payload.mime
+            )
+            if (fileName != null) {
+                com.clipsync.clipboard.ClipboardImageStore.markReceived(fileName)
+            }
+            if (fileName == null) {
+                Log.w("ClipSync", "✗ 图片落盘失败，仅记录历史")
+                HistoryStore.addClip(
+                    this,
+                    HistoryStore.HistoryItem(
+                        id = msg.id,
+                        kind = "image",
+                        text = "",
+                        preview = msg.payload.preview ?: "[图片]",
+                        direction = "in",
+                        ts = msg.ts
+                    )
+                )
+                return
+            }
             HistoryStore.addClip(
                 this,
                 HistoryStore.HistoryItem(
                     id = msg.id,
                     kind = "image",
                     text = "",
-                    preview = preview,
+                    preview = msg.payload.preview ?: "[图片]",
                     direction = "in",
-                    ts = msg.ts
+                    ts = msg.ts,
+                    imageName = fileName
                 )
             )
-            // Android 端暂不支持图片写入剪贴板（需要 URI 权限），只存历史
+            if (ClipboardManagerHelper.autoApplyEnabled) {
+                com.clipsync.clipboard.ClipboardManagerHelper.suppressNext()
+                val ok = com.clipsync.clipboard.ClipboardImageStore.writeToClipboard(this, fileName)
+                android.widget.Toast.makeText(
+                    this,
+                    if (ok) "收到图片，已复制到剪贴板" else "收到图片，可在历史中查看",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            } else {
+                android.widget.Toast.makeText(this, "收到图片，可在历史中查看", android.widget.Toast.LENGTH_SHORT).show()
+            }
             return
         }
 
@@ -198,6 +250,8 @@ class SyncService : Service() {
         )
 
         if (ClipboardManagerHelper.autoApplyEnabled) {
+            // 先标记远端文本，防止写入剪贴板后被监听器重新上传（回环）
+            ClipboardManagerHelper.markRemoteText(text)
             val a11y = ClipSyncAccessibilityService.instance
             if (a11y != null) a11y.applyRemoteText(text)
             else ClipboardManagerHelper.applyRemoteText(text)
@@ -273,6 +327,22 @@ class SyncService : Service() {
                             ts = System.currentTimeMillis() / 1000
                         )
                     )
+                } else if (kind == "image" && !data.isNullOrEmpty()) {
+                    val fileName = com.clipsync.clipboard.ClipboardImageStore.saveBase64(
+                        this, data, mime
+                    )
+                    HistoryStore.addClip(
+                        this,
+                        HistoryStore.HistoryItem(
+                            id = UUID.randomUUID().toString(),
+                            kind = "image",
+                            text = "",
+                            preview = preview,
+                            direction = "out",
+                            ts = System.currentTimeMillis() / 1000,
+                            imageName = fileName ?: ""
+                        )
+                    )
                 }
             }
         }
@@ -285,6 +355,8 @@ class SyncService : Service() {
         stateJob?.cancel()
         serviceScope.coroutineContext[Job]?.cancel()
         ws?.stop()
+        ws = null
+        currentWs = null
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
         ConnectionBus.publish(ConnectionBus.STATE_CLOSED)

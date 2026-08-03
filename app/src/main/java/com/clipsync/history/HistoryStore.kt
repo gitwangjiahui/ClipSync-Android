@@ -26,7 +26,8 @@ object HistoryStore {
         val text: String,       // 主体内容
         val preview: String,    // 短预览
         val direction: String,  // "in" 收到  / "out" 本机发出
-        val ts: Long            // 秒级时间戳
+        val ts: Long,           // 秒级时间戳
+        val imageName: String = "" // 图片相对文件名（clip_images/ 下），非图片为空
     )
 
     fun addSms(ctx: Context, item: HistoryItem) = append(ctx, KEY_SMS, item)

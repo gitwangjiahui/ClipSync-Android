@@ -42,10 +42,12 @@ object ImageHelper {
                 return null
             }
             val compressed = compressBitmap(originalBitmap)
-            originalBitmap.recycle()
 
             val baos = ByteArrayOutputStream()
             compressed.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, baos)
+            // 不需要缩放时 compressed 与 originalBitmap 是同一个对象，
+            // 必须等压缩完成后再回收，且只回收一次
+            if (compressed !== originalBitmap) originalBitmap.recycle()
             compressed.recycle()
             val outBytes = baos.toByteArray()
             val base64 = Base64.encodeToString(outBytes, Base64.NO_WRAP)

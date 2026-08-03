@@ -70,17 +70,41 @@ class WsClient(
 
     fun stop() {
         running = false
+        kickRequested = true
         job?.cancel()
         ws?.close(1000, "bye")
         ws = null
     }
 
+    /** 回前台时调用：跳过退避等待立即重连 */
+    @Volatile
+    private var kickRequested = false
+
+    fun kick() {
+        kickRequested = true
+    }
+
     private suspend fun loop() {
-        // 只连一次：失败/断开后由 SyncService 停服，用户在主界面手动再点一次才会重连。
-        try {
-            connectOnce()
-        } catch (e: Exception) {
-            Log.w("ClipSync", "✗ 连接异常: ${e.message}")
+        // 断线自动重连：2s 起步指数退避，封顶 30s；连上后重置退避。
+        // stop() 时 running=false 退出循环。
+        var backoff = 2_000L
+        while (running) {
+            try {
+                connectOnce()
+                backoff = 2_000L
+            } catch (e: Exception) {
+                Log.w("ClipSync", "✗ 连接异常: ${e.message}")
+            }
+            if (!running) break
+            _state.value = State.CONNECTING
+            Log.i("ClipSync", "🔁 ${backoff / 1000}s 后自动重连")
+            val deadline = System.currentTimeMillis() + backoff
+            while (running && System.currentTimeMillis() < deadline) {
+                if (kickRequested) break
+                kotlinx.coroutines.delay(200)
+            }
+            kickRequested = false
+            backoff = (backoff * 2).coerceAtMost(30_000L)
         }
         running = false
         _state.value = State.CLOSED
@@ -136,6 +160,7 @@ class WsClient(
      * @param type 走 MessageType 里的常量：NOTIFY_PC / NOTIFY_MOBILE / NOTIFY_ALL / CLIPBOARD
      * @param kind 业务子类型，比如 "sms_code" / "text" / "image" / "share"
      */
+    /** @return true = 立即发出；false = 未连接，已进离线队列，连接恢复后自动发 */
     fun send(
         type: String,
         payloadText: String? = null,
@@ -144,7 +169,7 @@ class WsClient(
         preview: String? = null,
         kind: String? = null,
         to: String = "*"
-    ) {
+    ): Boolean {
         val msg = Message(
             id = UUID.randomUUID().toString(),
             type = type,
@@ -164,7 +189,9 @@ class WsClient(
         if (sent != true) {
             synchronized(pendingQueue) { pendingQueue.add(raw) }
             Log.w("ClipSync", "⏸ 暂存消息 (未连接): $type")
+            return false
         }
+        return true
     }
 
     /** 连接恢复后，把队列里的消息发出去 */
