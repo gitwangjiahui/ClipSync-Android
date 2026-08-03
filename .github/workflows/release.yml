@@ -158,7 +158,17 @@ jobs:
           ls -la dist/ || true
           test -n "$(find dist -name '*.apk' -print -quit)" || (echo "❌ 没拿到 APK" && exit 1)
 
-      - name: 发布 Release
+      - name: 检查 Release 是否已存在
+        id: chk
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ steps.ver.outputs.RELEASE_TAG }}")
+          echo "exists=$([ "$code" = "200" ] && echo true || echo false)" >> $GITHUB_OUTPUT
+          echo "  Release ${{ steps.ver.outputs.RELEASE_TAG }} 存在性: $code"
+
+      - name: 发布 Release（仅当不存在时创建，避免重复更新被权限拦截）
+        if: steps.chk.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.RELEASE_TAG }}
