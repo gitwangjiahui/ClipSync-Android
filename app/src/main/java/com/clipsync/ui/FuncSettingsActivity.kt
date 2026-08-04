@@ -4,12 +4,14 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.text.Editable
 import android.text.InputType
+import android.text.method.PasswordTransformationMethod
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -17,6 +19,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.clipsync.BuildConfig
+import com.clipsync.R
 import com.clipsync.clipboard.ClipboardManagerHelper
 import com.clipsync.crypto.PayloadCipher
 import com.clipsync.net.AuthClient
@@ -79,7 +82,7 @@ class FuncSettingsActivity : AppCompatActivity() {
             setPadding(24, 20, 24, 20)
         }
         connCard.addView(usernameEdit, marginParams(12))
-        connCard.addView(passwordEdit, marginParams(12))
+        connCard.addView(passwordRow(passwordEdit), marginParams(12))
 
         // 状态提示：账密是否填全、当前是否已拿到 token
         val statusText = TextView(this).apply {
@@ -138,20 +141,21 @@ class FuncSettingsActivity : AppCompatActivity() {
                 refreshFingerprint(fingerprintText)
             }
         })
+        val syncPwdRow = passwordRow(syncPwdEdit)
 
         val e2eeCb = CheckBox(this).apply {
             text = "启用端到端加密（服务端只转发密文）"
             isChecked = PayloadCipher.isEnabled(this@FuncSettingsActivity)
             setOnCheckedChangeListener { _, checked ->
                 PayloadCipher.setEnabled(this@FuncSettingsActivity, checked)
-                syncPwdEdit.isEnabled = checked
+                setRowEnabled(syncPwdRow, checked)
                 refreshFingerprint(fingerprintText)
             }
         }
-        syncPwdEdit.isEnabled = e2eeCb.isChecked
+        setRowEnabled(syncPwdRow, e2eeCb.isChecked)
 
         cryptoCard.addView(e2eeCb, marginParams(12))
-        cryptoCard.addView(syncPwdEdit, marginParams(12))
+        cryptoCard.addView(syncPwdRow, marginParams(12))
         cryptoCard.addView(fingerprintText)
         refreshFingerprint(fingerprintText)
         container.addView(cryptoCard, cardParams())
@@ -298,6 +302,57 @@ class FuncSettingsActivity : AppCompatActivity() {
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
         override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
         override fun afterTextChanged(s: Editable?) = action()
+    }
+
+    /**
+     * 把密码输入框和「小眼睛」按钮并成一行，点眼睛切换明文 / 密文。
+     *
+     * 用 transformationMethod 而不是改 inputType：后者会让输入法重置状态，
+     * 已输入内容的字体也可能跳变。切换后要把光标挪回末尾，否则会跳到开头。
+     */
+    private fun passwordRow(edit: EditText): LinearLayout {
+        val eye = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_eye_off)
+            background = null
+            contentDescription = "显示密码"
+            setPadding(20, 0, 8, 0)
+        }
+        eye.setOnClickListener {
+            val nowRevealed = edit.transformationMethod == null
+            if (nowRevealed) {
+                edit.transformationMethod = PasswordTransformationMethod.getInstance()
+                eye.setImageResource(R.drawable.ic_eye_off)
+                eye.contentDescription = "显示密码"
+            } else {
+                edit.transformationMethod = null
+                eye.setImageResource(R.drawable.ic_eye)
+                eye.contentDescription = "隐藏密码"
+            }
+            edit.setSelection(edit.text.length)
+        }
+
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(
+                edit,
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
+            addView(
+                eye,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+    }
+
+    /** 连同行内的输入框和眼睛按钮一起启用/禁用（LinearLayout 不会自动传递） */
+    private fun setRowEnabled(row: LinearLayout, enabled: Boolean) {
+        for (i in 0 until row.childCount) {
+            row.getChildAt(i).isEnabled = enabled
+        }
     }
 
     /**
