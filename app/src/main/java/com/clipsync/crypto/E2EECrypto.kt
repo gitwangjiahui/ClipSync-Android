@@ -30,6 +30,16 @@ object E2EECrypto {
     const val KDF_NAME = "PBKDF2-HMAC-SHA256"
     const val ITERATIONS = 200_000
 
+    /**
+     * 内置默认同步密码：用户开了加密但没填自己的密码时使用。
+     *
+     * 写死在三端，所以"开了加密却没填密码"不会退化成明文，两端也不需要任何
+     * 约定就能互通。强度弱于用户自设密码（值是公开的），只作兜底默认值。
+     * 三端必须同步：Mac 端 E2EECrypto.builtinSyncPassword，
+     * 服务端 e2ee.go 的 BuiltinSyncPassword。
+     */
+    const val BUILTIN_SYNC_PASSWORD = "cs1-louuMZxNFCXgL1AcXjlBCly2E54NeH5T"
+
     private const val SALT_SEED = "clipsync-e2ee-v1"
     private const val IV_LENGTH = 12
     private const val TAG_BITS = 128

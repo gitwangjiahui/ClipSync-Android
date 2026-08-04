@@ -49,6 +49,20 @@ object AuthClient {
     class AuthException(message: String) : Exception(message)
 
     /**
+     * 换 token 的结果。失败时带上一句能直接展示给用户的原因，
+     * 让"账密不对"和"网络不通"在界面上区分得开。
+     */
+    sealed interface TokenResult {
+        data class Ok(val token: String) : TokenResult
+        /** 账号密码没填全 */
+        data object MissingCredentials : TokenResult
+        /** 服务端明确拒绝（账号或密码错误、账号被禁用等） */
+        data class Rejected(val reason: String) : TokenResult
+        /** 连不上服务端（网络不通、地址错误、服务未启动） */
+        data class Unreachable(val reason: String) : TokenResult
+    }
+
+    /**
      * 把 ws:// / wss:// 转成 http:// / https://。
      * 设置页里填的是 WebSocket 地址，认证接口走同一端口的 HTTP。
      */
@@ -151,16 +165,16 @@ object AuthClient {
      * 只在本地没有 token 时才打 /auth/login，避免每次重连都去撞登录限流；
      * token 失效的场景由 WS 握手返回 401 触发 [clearSession] + 重连来兜住。
      *
-     * @return 可用的 token；账号密码没填或登录失败时返回 null
+     * 失败时区分"账密被拒"和"连不上服务端"，让上层能给出准确提示。
      */
-    suspend fun ensureToken(ctx: Context, serverUrl: String): String? {
-        savedToken(ctx).takeIf { it.isNotEmpty() }?.let { return it }
+    suspend fun ensureToken(ctx: Context, serverUrl: String): TokenResult {
+        savedToken(ctx).takeIf { it.isNotEmpty() }?.let { return TokenResult.Ok(it) }
 
         val username = savedUsername(ctx)
         val password = savedPassword(ctx)
         if (username.isEmpty() || password.isEmpty()) {
             Log.w("ClipSync", "✗ 未填写账号密码，无法连接")
-            return null
+            return TokenResult.MissingCredentials
         }
         return try {
             val session = login(serverUrl, username, password)
@@ -170,11 +184,28 @@ object AuthClient {
             else
                 "已签发新 Token"
             Log.i("ClipSync", "🔑 连接前自动登录成功：$how")
-            session.token
+            TokenResult.Ok(session.token)
+        } catch (e: AuthException) {
+            // 服务端答复了，只是不认这套凭据
+            Log.w("ClipSync", "✗ 登录被拒: ${e.message}")
+            TokenResult.Rejected(e.message ?: "账号或密码不正确")
         } catch (e: Exception) {
-            Log.w("ClipSync", "✗ 自动登录失败: ${e.message}")
-            null
+            Log.w("ClipSync", "✗ 无法连接服务器: ${e.message}")
+            TokenResult.Unreachable(describeNetworkError(e))
         }
+    }
+
+    /**
+     * 把 OkHttp / JDK 抛出的网络异常翻成一句用户能看懂的话。
+     * 异常类名对用户毫无意义，但"服务器地址填错了"和"没连上网"是他能处理的。
+     */
+    fun describeNetworkError(e: Throwable): String = when (e) {
+        is java.net.UnknownHostException -> "找不到服务器，请检查地址和网络连接"
+        is java.net.SocketTimeoutException -> "连接服务器超时，请检查网络或服务器是否已启动"
+        is java.net.ConnectException -> "服务器拒绝连接，请确认地址、端口和服务是否已启动"
+        is javax.net.ssl.SSLException -> "TLS 握手失败，请确认服务器证书配置"
+        else -> e.message?.takeIf { it.isNotBlank() }?.let { "网络错误：$it" }
+            ?: "网络不可用，请检查网络连接"
     }
 
     // ===== 内部 =====

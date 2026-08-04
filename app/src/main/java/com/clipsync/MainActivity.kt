@@ -100,11 +100,13 @@ class MainActivity : AppCompatActivity() {
         ConnectionBus.addListener(stateListener)
         renderTarget()
         com.clipsync.clipboard.ClipboardManagerHelper.onForeground()
-        // 服务被系统杀过就拉起来；没杀则 kick 立即重连
-        if (com.clipsync.service.SyncService.activeWs() == null) {
+        // 服务没连上（被杀过，或上次连接时没网）就重新发起；已连上则 kick 加速重连。
+        // 注意 activeWs()==null 也包含"服务活着但换 token 时失败"这种情况，
+        // startSync() 带 ACTION_CONNECT 能让服务重试，不会空转。
+        if (SyncService.activeWs() == null) {
             startSync()
         } else {
-            com.clipsync.service.SyncService.kick()
+            SyncService.kick()
         }
         ClipboardManagerHelper.addPreviewListener(previewListener)
         // 第一次预览（窗口未获焦点，可能读不到内容，下面 onWindowFocusChanged 会再读）
@@ -327,6 +329,7 @@ class MainActivity : AppCompatActivity() {
                 (statusBadge.background as? GradientDrawable)?.setColor(0xFFDCFCE7.toInt())
                 statusText.text = "已连接"
                 statusHint.text = "同步中，可正常收发消息"
+                statusHint.setTextColor(0xFF9CA3AF.toInt())
                 toggleBtn.text = "停止"
                 (toggleBtn.background as? GradientDrawable)?.setColor(0xFFEF4444.toInt())
                 toggleBtn.isEnabled = true
@@ -340,6 +343,7 @@ class MainActivity : AppCompatActivity() {
                 (statusBadge.background as? GradientDrawable)?.setColor(0xFFFEF3C7.toInt())
                 statusText.text = "连接中"
                 statusHint.text = "正在连接服务器…"
+                statusHint.setTextColor(0xFF9CA3AF.toInt())
                 toggleBtn.text = "取消"
                 (toggleBtn.background as? GradientDrawable)?.setColor(0xFFEF4444.toInt())
                 toggleBtn.isEnabled = true
@@ -347,8 +351,10 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             else -> {
-                // 服务还活着 = 只是瞬时断线，内部在自动重连，不报失败
-                val serviceAlive = com.clipsync.service.SyncService.activeWs() != null
+                // 服务还活着 = 只是瞬时断线，内部在自动重连，不报失败。
+                // 但已经有明确失败原因时（账密不对 / 网络不通）就别再假装在重连了。
+                val reason = ConnectionBus.failureReason
+                val serviceAlive = SyncService.activeWs() != null && reason == null
                 if (serviceAlive) {
                     startDotAnimation()
                     statusDot.setTextColor(0xFFF59E0B.toInt())
@@ -362,11 +368,15 @@ class MainActivity : AppCompatActivity() {
                     statusDot.setTextColor(0xFF9CA3AF.toInt())
                     (statusBadge.background as? GradientDrawable)?.setColor(0xFFEEF2FF.toInt())
                     statusText.text = "未连接"
-                    statusHint.text = if (lastWasConnecting) {
-                        "连接失败，请检查网络或服务器后再次启动"
-                    } else {
-                        "请检查网络或检查服务器配置"
+                    // 优先展示服务端 / 网络层给出的具体原因，笼统提示只作兜底
+                    statusHint.text = when {
+                        reason != null -> reason
+                        lastWasConnecting -> "连接失败，请检查网络或服务器后再次启动"
+                        else -> "点「启动」开始同步"
                     }
+                    statusHint.setTextColor(
+                        if (reason != null) 0xFFDC2626.toInt() else 0xFF9CA3AF.toInt()
+                    )
                     toggleBtn.text = "启动"
                     (toggleBtn.background as? GradientDrawable)?.setColor(0xFF22C55E.toInt())
                 }
@@ -378,7 +388,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderTarget() {
         val sp = getSharedPreferences("clipsync", MODE_PRIVATE)
-        val server = sp.getString("server", null) ?: com.clipsync.BuildConfig.DEFAULT_SERVER
+        val raw = sp.getString("server", null) ?: com.clipsync.BuildConfig.DEFAULT_SERVER
+        // 展示规范化后的完整地址，让用户看到程序实际连的是哪里（ws:// 是自动补的）
+        val server = com.clipsync.net.ServerAddress.normalize(raw).ifEmpty { "未填写服务器地址" }
         // 账号密码没填就连不上；token 由连接时自动换取，不需要用户关心
         val tip = if (com.clipsync.net.AuthClient.hasCredentials(this)) "" else "  ·  ⚠ 未填写账号密码"
         targetText.text = "🔗  $server$tip"
@@ -495,9 +507,15 @@ class MainActivity : AppCompatActivity() {
 
     // MARK: - 启动 / 停止
 
+    /**
+     * 启动 / 取消。
+     *
+     * 判断依据是"同步服务是否还活着"，不是 ConnectionBus 的瞬时状态：
+     * 退避重连期间状态会在 connecting 和 closed 之间来回跳，按状态判断的话，
+     * 用户点在 closed 那一瞬间反而会再启动一次服务，看起来就是"取消没反应"。
+     */
     private fun toggleSync() {
-        val current = ConnectionBus.current
-        if (current == ConnectionBus.STATE_OPEN || current == ConnectionBus.STATE_CONNECTING) {
+        if (isSyncServiceRunning()) {
             stopSync()
         } else {
             renderState(ConnectionBus.STATE_CONNECTING)
@@ -505,8 +523,25 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 同步服务是否正在连接或已连接。
+     *
+     * activeWs() 只在 WebSocket 建起来后才非空，"正在换 token"那段它还是 null，
+     * 所以要再看一眼总线状态兜住空窗，否则那几百毫秒里「取消」会被当成「启动」。
+     * 反过来，已经有明确失败原因时就算是"停下了"，用户该看到「启动」。
+     */
+    private fun isSyncServiceRunning(): Boolean {
+        if (ConnectionBus.failureReason != null) return false
+        return SyncService.activeWs() != null ||
+            ConnectionBus.current == ConnectionBus.STATE_CONNECTING ||
+            ConnectionBus.current == ConnectionBus.STATE_OPEN
+    }
+
     private fun startSync() {
-        val intent = Intent(this, SyncService::class.java)
+        // 带上 ACTION_CONNECT：服务已存活但连接没建起来时，让它重试而不是空转
+        val intent = Intent(this, SyncService::class.java).apply {
+            action = SyncService.ACTION_CONNECT
+        }
         if (Build.VERSION.SDK_INT >= 26) {
             startForegroundService(intent)
         } else {
@@ -518,14 +553,17 @@ class MainActivity : AppCompatActivity() {
     private fun autoConnectIfNeeded() {
         val sp = getSharedPreferences("clipsync", MODE_PRIVATE)
         if (!sp.getBoolean("auto_connect", true)) return
-        val current = ConnectionBus.current
-        if (current == ConnectionBus.STATE_OPEN || current == ConnectionBus.STATE_CONNECTING) return
+        if (isSyncServiceRunning()) return
+        // 上次已经明确失败过（比如密码错了）就别再自动重试，让用户先去改设置
+        if (ConnectionBus.failureReason != null) return
         renderState(ConnectionBus.STATE_CONNECTING)
         startSync()
     }
 
     private fun stopSync() {
         stopService(Intent(this, SyncService::class.java))
+        // 主动停止不是"失败"，把上一次的错误原因清掉，别让红字留在界面上
+        ConnectionBus.publish(ConnectionBus.STATE_CLOSED, null)
         renderState(ConnectionBus.STATE_CLOSED)
         lastWasConnecting = false
     }

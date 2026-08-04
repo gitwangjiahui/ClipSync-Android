@@ -57,8 +57,24 @@ object PayloadCipher {
             .edit().putBoolean(KEY_E2EE_ENABLED, enabled).apply()
     }
 
-    /** 加密实际生效需要同时满足：开关打开 + 密码非空 */
-    fun isActive(ctx: Context): Boolean = isEnabled(ctx) && syncPassword(ctx).isNotEmpty()
+    /**
+     * 实际用来派生密钥的密码。
+     *
+     * 开关关闭 → 空串（明文传输）；
+     * 开关打开但用户没填 → 内置默认密码，避免"开了加密却在发明文"；
+     * 开关打开且填了 → 用户自己的密码。
+     */
+    fun effectivePassword(ctx: Context): String {
+        if (!isEnabled(ctx)) return ""
+        return syncPassword(ctx).ifEmpty { E2EECrypto.BUILTIN_SYNC_PASSWORD }
+    }
+
+    /** 当前是否在用内置默认密码（UI 据此提示用户） */
+    fun usingBuiltinPassword(ctx: Context): Boolean =
+        isEnabled(ctx) && syncPassword(ctx).isEmpty()
+
+    /** 加密是否生效。开关打开就一定生效——没填密码时走内置默认密码。 */
+    fun isActive(ctx: Context): Boolean = isEnabled(ctx)
 
     // ===== 密钥缓存 =====
 

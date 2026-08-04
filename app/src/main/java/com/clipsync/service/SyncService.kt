@@ -40,6 +40,8 @@ class SyncService : Service() {
     companion object {
         const val ACTION_SEND_SMS_CODE = "com.clipsync.SEND_SMS_CODE"
         const val ACTION_SEND_SHARE = "com.clipsync.SEND_SHARE"
+        /** 显式的"重试连接"请求：服务活着但连接没建起来时用它踢一脚 */
+        const val ACTION_CONNECT = "com.clipsync.CONNECT"
         const val EXTRA_TEXT = "text"
         const val EXTRA_PREVIEW = "preview"
         const val EXTRA_DATA = "data"
@@ -80,6 +82,29 @@ class SyncService : Service() {
     private var stateJob: Job? = null
     private var authJob: Job? = null
 
+    /** 网络恢复监听：没网时连接失败后，联网瞬间自动重试，不必用户手动点 */
+    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+
+    /**
+     * 服务是否已经收到 onDestroy。
+     *
+     * 换 token 是异步的：用户在"连接中"点取消会 stopService，但那个请求还在飞，
+     * 回来后如果照旧建连，就会造出一个没人管的 WsClient —— activeWs() 永远非空，
+     * 于是"取消"按钮再也点不动。这个标记让迟到的回调自己退场。
+     */
+    @Volatile
+    private var destroyed = false
+
+    /**
+     * 是否有一次换 token 正在进行。
+     *
+     * 换 token 走网络，期间 ws 还是 null。少了这个标记，用户连点「启动」或
+     * 网络回调和 onStartCommand 撞在一起，就会并发打好几次 /auth/login，
+     * 直接撞上服务端每分钟 10 次的登录限流。
+     */
+    @Volatile
+    private var connecting = false
+
     /** 是否曾经进入过 CONNECTING/OPEN；用于区分"服务刚起、还没连"和"已连过又断了" */
     private var hasBeenConnectingOrOpen: Boolean = false
 
@@ -91,7 +116,35 @@ class SyncService : Service() {
         startForeground(buildNotification(ConnectionBus.STATE_CONNECTING))
         acquireWakeLock()
         com.clipsync.clipboard.ScreenshotWatcher.start(this)
+        watchNetwork()
         connectWs()
+    }
+
+    /**
+     * 监听网络可用事件。
+     *
+     * 场景：用户在飞行模式下点了启动，换 token 直接失败；之后连上 Wi-Fi，
+     * 如果没有这个监听，服务就一直干等着，界面停在未连接。
+     */
+    private fun watchNetwork() {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return
+        val cb = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: android.net.Network) {
+                if (destroyed) return
+                if (ws == null) {
+                    Log.i("ClipSync", "🌐 网络已恢复，重新尝试连接")
+                    serviceScope.launch { connectWs() }
+                } else {
+                    ws?.kick()
+                }
+            }
+        }
+        val request = android.net.NetworkRequest.Builder()
+            .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        runCatching { cm.registerNetworkCallback(request, cb) }
+            .onSuccess { networkCallback = cb }
+            .onFailure { Log.w("ClipSync", "✗ 网络监听注册失败: ${it.message}") }
     }
 
     private fun acquireWakeLock() {
@@ -106,48 +159,86 @@ class SyncService : Service() {
     }
 
     private fun connectWs() {
-        // 幂等：已经在连接/已连接就不重复创建
-        if (ws != null) {
-            Log.i("ClipSync", "⏸ 同步服务已在运行，忽略重复启动")
+        // 幂等：已连上、或正在换 token，都不要再发起一次
+        if (ws != null || connecting) {
+            Log.i("ClipSync", "⏸ 同步服务已在运行或正在连接，忽略重复启动")
             return
         }
         val sp = getSharedPreferences("clipsync", MODE_PRIVATE)
-        val server = sp.getString("server", null) ?: com.clipsync.BuildConfig.DEFAULT_SERVER
+        val raw = sp.getString("server", null) ?: com.clipsync.BuildConfig.DEFAULT_SERVER
+        // 用户可能只填了 host:port，这里统一补上 ws:// 前缀
+        val server = com.clipsync.net.ServerAddress.normalize(raw)
+        if (server.isEmpty()) {
+            Log.w("ClipSync", "✗ 未填写服务器地址")
+            ConnectionBus.publish(ConnectionBus.STATE_CLOSED, "请先在设置里填写服务器地址")
+            return
+        }
         Log.i("ClipSync", "→ 正在连接: $server")
 
         if (!AuthClient.isLoggedIn(this) && !AuthClient.hasCredentials(this)) {
             Log.w("ClipSync", "✗ 尚未填写账号密码，无法连接（请在设置里填写）")
-            ConnectionBus.publish(ConnectionBus.STATE_CLOSED)
+            ConnectionBus.publish(
+                ConnectionBus.STATE_CLOSED,
+                "请先在设置里填写用户名和密码（账号由管理员创建）"
+            )
             return
         }
 
         // 立即通知 UI 进入连接中状态：换 token 也算连接过程的一部分
         ConnectionBus.publish(ConnectionBus.STATE_CONNECTING)
+        connecting = true
 
         // 没有 token 就先用账号密码换一个，所以不需要单独的"登录"按钮。
         // 这一步走网络，必须在协程里做，不能阻塞 onCreate。
         serviceScope.launch {
-            val token = AuthClient.ensureToken(this@SyncService, server)
-            if (token.isNullOrBlank()) {
-                Log.w("ClipSync", "✗ 账号密码校验失败，连接中止")
-                ConnectionBus.publish(ConnectionBus.STATE_CLOSED)
-                return@launch
+            try {
+                when (val result = AuthClient.ensureToken(this@SyncService, server)) {
+                    is AuthClient.TokenResult.Ok -> openWs(server, result.token)
+                    is AuthClient.TokenResult.MissingCredentials -> stopWithReason(
+                        "请先在设置里填写用户名和密码（账号由管理员创建）"
+                    )
+                    is AuthClient.TokenResult.Rejected -> stopWithReason(
+                        "登录失败：${result.reason}，请到设置里检查用户名和密码"
+                    )
+                    is AuthClient.TokenResult.Unreachable -> stopWithReason(
+                        "连接失败：${result.reason}"
+                    )
+                }
+            } finally {
+                connecting = false
             }
-            openWs(server, token)
         }
+    }
+
+    /**
+     * 连接不成功时收摊：把原因发给界面，服务继续留着待命。
+     *
+     * 不 stopSelf 是有意的 —— 网络恢复监听还挂在这个服务上，联网瞬间就能自动
+     * 重试。界面判断"是否在连接"看的是 failureReason，所以服务活着也不会让
+     * 「取消」按钮失灵。
+     */
+    private fun stopWithReason(reason: String) {
+        Log.w("ClipSync", "✗ $reason")
+        // 建连失败留下的半成品要清掉，否则 ws != null 会挡住后续重试
+        ws?.stop()
+        ws = null
+        currentWs = null
+        ConnectionBus.publish(ConnectionBus.STATE_CLOSED, reason)
+        val nm = getSystemService(NotificationManager::class.java)
+        nm?.notify(NOTIFICATION_ID, buildNotification(ConnectionBus.STATE_CLOSED))
     }
 
     /** 拿到 token 后真正建立 WebSocket 连接 */
     private fun openWs(server: String, token: String) {
-        if (ws != null) return
+        // 服务已被销毁（用户点了取消）就别再建连，否则留下一个没人回收的连接
+        if (destroyed || ws != null) {
+            if (destroyed) Log.i("ClipSync", "⏸ 服务已停止，放弃迟到的建连请求")
+            return
+        }
 
         val deviceID = UUID.randomUUID().toString()
-        // 加密开启且密码非空时传入同步密码；空串表示走明文
-        val syncPassword = if (com.clipsync.crypto.PayloadCipher.isActive(this)) {
-            com.clipsync.crypto.PayloadCipher.syncPassword(this)
-        } else {
-            ""
-        }
+        // 加密开启时用有效密码（用户没填就是内置默认密码）；关闭时空串走明文
+        val syncPassword = com.clipsync.crypto.PayloadCipher.effectivePassword(this)
         val wsClient = WsClient(server, token, deviceID, syncPassword).also { it.start() }
         ws = wsClient
         currentWs = wsClient
@@ -176,17 +267,25 @@ class SyncService : Service() {
                 Log.w("ClipSync", "🔒 token 失效，尝试用已保存的账号密码重新登录")
                 AuthClient.clearSession(this@SyncService)
                 if (!AuthClient.hasCredentials(this@SyncService)) {
-                    Log.w("ClipSync", "✗ 无账号密码可用，请到设置里填写")
-                    ConnectionBus.publish(ConnectionBus.STATE_CLOSED)
+                    stopWithReason("登录已失效，请到设置里填写用户名和密码")
                     return@collect
                 }
-                val fresh = AuthClient.ensureToken(this@SyncService, server)
-                if (fresh.isNullOrBlank()) {
-                    Log.w("ClipSync", "✗ 重新登录失败，停止重连")
-                    ConnectionBus.publish(ConnectionBus.STATE_CLOSED)
-                    return@collect
+                val fresh = when (val r = AuthClient.ensureToken(this@SyncService, server)) {
+                    is AuthClient.TokenResult.Ok -> r.token
+                    is AuthClient.TokenResult.Rejected -> {
+                        stopWithReason("登录失败：${r.reason}，请到设置里检查用户名和密码")
+                        return@collect
+                    }
+                    is AuthClient.TokenResult.Unreachable -> {
+                        stopWithReason("连接失败：${r.reason}")
+                        return@collect
+                    }
+                    is AuthClient.TokenResult.MissingCredentials -> {
+                        stopWithReason("请先在设置里填写用户名和密码")
+                        return@collect
+                    }
                 }
-        // 换掉旧连接，用新 token 重新建立
+                // 换掉旧连接，用新 token 重新建立
                 ws?.stop()
                 ws = null
                 currentWs = null
@@ -350,6 +449,15 @@ class SyncService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
+            null, ACTION_CONNECT -> {
+                // 服务活着但没连上（比如上次换 token 时没网）：这里重试一次。
+                // 少了这一步，用户点「启动」会打到一个什么都不做的 onStartCommand，
+                // 界面就永远停在"连接中"。
+                if (ws == null) {
+                    Log.i("ClipSync", "↻ 收到连接请求，重新尝试建立连接")
+                    connectWs()
+                }
+            }
             ACTION_SEND_SMS_CODE -> {
                 val text = intent.getStringExtra(EXTRA_TEXT) ?: return START_STICKY
                 val preview = intent.getStringExtra(EXTRA_PREVIEW) ?: "短信验证码"
@@ -425,6 +533,16 @@ class SyncService : Service() {
 
     override fun onDestroy() {
         Log.i("ClipSync", "⚪ 同步服务已停止")
+        // 先立标记：让还在飞的登录请求回来后不要再建连
+        destroyed = true
+        connecting = false
+        networkCallback?.let { cb ->
+            runCatching {
+                getSystemService(android.net.ConnectivityManager::class.java)
+                    ?.unregisterNetworkCallback(cb)
+            }
+        }
+        networkCallback = null
         incomingJob?.cancel()
         stateJob?.cancel()
         authJob?.cancel()
@@ -434,7 +552,8 @@ class SyncService : Service() {
         currentWs = null
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
-        ConnectionBus.publish(ConnectionBus.STATE_CLOSED)
+        // 保留已有的失败原因（stopWithReason 刚设过），用户主动停止时它是 null
+        ConnectionBus.publish(ConnectionBus.STATE_CLOSED, ConnectionBus.failureReason)
         super.onDestroy()
     }
 

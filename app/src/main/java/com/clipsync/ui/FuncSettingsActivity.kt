@@ -23,6 +23,7 @@ import com.clipsync.R
 import com.clipsync.clipboard.ClipboardManagerHelper
 import com.clipsync.crypto.PayloadCipher
 import com.clipsync.net.AuthClient
+import com.clipsync.net.ServerAddress
 import com.clipsync.service.SyncService
 import kotlinx.coroutines.launch
 
@@ -35,8 +36,11 @@ import kotlinx.coroutines.launch
  */
 class FuncSettingsActivity : AppCompatActivity() {
 
-    /** 进入本页时的账号密码，离开时用来判断要不要重连 */
-    private var credentialsAtEntry: Pair<String, String> = "" to ""
+    /**
+     * 进入本页时的连接相关配置快照，离开时用来判断要不要重连。
+     * 内容：用户名、登录密码、服务器地址、加密开关、同步密码。
+     */
+    private var connectionSnapshotAtEntry: List<String> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -45,6 +49,9 @@ class FuncSettingsActivity : AppCompatActivity() {
 
         val sp = getSharedPreferences("clipsync", MODE_PRIVATE)
         val server = sp.getString("server", null) ?: BuildConfig.DEFAULT_SERVER
+        // 在建控件之前拍快照：控件的 TextWatcher 一挂上就会回写规范化后的值，
+        // 那不是用户的改动，不该被算成"配置变了"
+        connectionSnapshotAtEntry = connectionSnapshot()
         val scroll = ScrollView(this)
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -55,14 +62,36 @@ class FuncSettingsActivity : AppCompatActivity() {
         val connCard = cardLayout()
         connCard.addView(sectionTitle("账号", 0xFF3B82F6.toInt()))
 
+        // 地址只填 host:port，ws:// 由程序补齐（ServerAddress.normalize）
         val serverEdit = EditText(this).apply {
-            hint = "服务器地址 (ws://...)"
-            setText(server)
+            hint = "服务器地址，例如 192.168.1.10:8080"
+            setText(ServerAddress.displayForm(server))
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             background = roundedBg(0xFFF3F4F6.toInt(), 12f)
             setPadding(24, 20, 24, 20)
         }
-        serverEdit.addTextChangedListener(persistWatcher(sp, "server"))
-        connCard.addView(serverEdit, marginParams(16))
+        connCard.addView(serverEdit, marginParams(8))
+
+        // 实时回显程序真正会连的地址，用户不用猜前缀补成了什么
+        val serverResolvedText = TextView(this).apply {
+            textSize = 12f
+            setTextColor(0xFF6B7280.toInt())
+            typeface = android.graphics.Typeface.MONOSPACE
+            setPadding(4, 0, 0, 0)
+        }
+        connCard.addView(serverResolvedText, marginParams(16))
+
+        val refreshServerHint = {
+            val normalized = ServerAddress.normalize(serverEdit.text.toString())
+            serverResolvedText.text =
+                if (normalized.isEmpty()) "请填写服务器地址" else "将连接 $normalized"
+        }
+        serverEdit.addTextChangedListener(afterTextChanged {
+            // 存规范化后的完整地址，读取方（SyncService / AuthClient）拿到的就是可用值
+            sp.edit().putString("server", ServerAddress.normalize(serverEdit.text.toString())).apply()
+            refreshServerHint()
+        })
+        refreshServerHint()
 
         val usernameEdit = EditText(this).apply {
             hint = "用户名"
@@ -105,7 +134,6 @@ class FuncSettingsActivity : AppCompatActivity() {
         }
         usernameEdit.addTextChangedListener(afterTextChanged(onCredentialChanged))
         passwordEdit.addTextChangedListener(afterTextChanged(onCredentialChanged))
-        credentialsAtEntry = AuthClient.savedUsername(this) to AuthClient.savedPassword(this)
 
         val autoConnectCb = CheckBox(this).apply {
             text = "启动时自动连接并开始同步"
@@ -127,7 +155,7 @@ class FuncSettingsActivity : AppCompatActivity() {
         }
 
         val syncPwdEdit = EditText(this).apply {
-            hint = "同步密码（两端需填一致）"
+            hint = "同步密码（留空则用内置默认密码）"
             setText(PayloadCipher.syncPassword(this@FuncSettingsActivity))
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             background = roundedBg(0xFFF3F4F6.toInt(), 12f)
@@ -148,11 +176,12 @@ class FuncSettingsActivity : AppCompatActivity() {
             isChecked = PayloadCipher.isEnabled(this@FuncSettingsActivity)
             setOnCheckedChangeListener { _, checked ->
                 PayloadCipher.setEnabled(this@FuncSettingsActivity, checked)
-                setRowEnabled(syncPwdRow, checked)
+                // 关闭加密时整行隐藏：明文传输下这个输入框没有意义
+                syncPwdRow.visibility = if (checked) View.VISIBLE else View.GONE
                 refreshFingerprint(fingerprintText)
             }
         }
-        setRowEnabled(syncPwdRow, e2eeCb.isChecked)
+        syncPwdRow.visibility = if (e2eeCb.isChecked) View.VISIBLE else View.GONE
 
         cryptoCard.addView(e2eeCb, marginParams(12))
         cryptoCard.addView(syncPwdRow, marginParams(12))
@@ -217,15 +246,30 @@ class FuncSettingsActivity : AppCompatActivity() {
         }
     }
 
-    /** 展示密钥指纹，方便和电脑端比对是否一致 */
+    /**
+     * 说清当前加密状态，并展示密钥指纹方便和电脑端比对。
+     *
+     * 三种情况：关闭（明文）、启用但没填密码（内置默认密码）、启用且填了密码。
+     */
     private fun refreshFingerprint(view: TextView) {
-        val active = PayloadCipher.isActive(this)
-        val fp = if (active) PayloadCipher.fingerprint(PayloadCipher.syncPassword(this)) else null
-        view.text = when {
-            !PayloadCipher.isEnabled(this) -> "加密已关闭：消息将以明文发送"
-            fp == null -> "未设置同步密码：消息将以明文发送"
-            else -> "密钥指纹 $fp（两端一致才能互相解密）"
+        if (!PayloadCipher.isEnabled(this)) {
+            view.text = "加密已关闭：消息以明文传输"
+            view.setTextColor(0xFF6B7280.toInt())
+            return
         }
+        val fp = PayloadCipher.fingerprint(PayloadCipher.effectivePassword(this))
+        if (PayloadCipher.usingBuiltinPassword(this)) {
+            view.text = "未填同步密码，正在使用内置默认密码（各端通用，强度低于自设密码）" +
+                if (fp != null) "\n密钥指纹 $fp" else ""
+            view.setTextColor(0xFFD97706.toInt())
+            return
+        }
+        view.text = if (fp != null) {
+            "使用自设同步密码 · 密钥指纹 $fp（两端一致才能互相解密）"
+        } else {
+            "同步密码无法派生密钥，请换一个密码"
+        }
+        view.setTextColor(0xFF059669.toInt())
     }
 
     private fun toast(msg: String) {
@@ -286,17 +330,6 @@ class FuncSettingsActivity : AppCompatActivity() {
             setColor(color)
         }
 
-    private fun persistWatcher(
-        sp: android.content.SharedPreferences,
-        key: String
-    ): TextWatcher = object : TextWatcher {
-        override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-        override fun afterTextChanged(s: Editable?) {
-            sp.edit().putString(key, s?.toString()?.trim() ?: "").apply()
-        }
-    }
-
     /** 只关心"输入完成"这一刻的 TextWatcher 简写 */
     private fun afterTextChanged(action: () -> Unit): TextWatcher = object : TextWatcher {
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -348,26 +381,33 @@ class FuncSettingsActivity : AppCompatActivity() {
         }
     }
 
-    /** 连同行内的输入框和眼睛按钮一起启用/禁用（LinearLayout 不会自动传递） */
-    private fun setRowEnabled(row: LinearLayout, enabled: Boolean) {
-        for (i in 0 until row.childCount) {
-            row.getChildAt(i).isEnabled = enabled
-        }
-    }
-
     /**
-     * 离开设置页时，如果账号密码变了就重启同步服务，让它用新凭据重新换 token。
+     * 离开设置页时，只要连接相关配置变了就重启同步服务。
      *
-     * 放在 onPause 而不是每次输入回调里，是为了避免边打字边重连。
+     * 地址、账密要重新换 token，加密设置要重新派生密钥 —— 这些参数都是
+     * WsClient 构造时读的，不重启不生效。放在 onPause 是为了避免边打字边重连。
      */
     override fun onPause() {
         super.onPause()
-        val now = AuthClient.savedUsername(this) to AuthClient.savedPassword(this)
-        if (now != credentialsAtEntry) {
-            credentialsAtEntry = now
+        val now = connectionSnapshot()
+        if (now != connectionSnapshotAtEntry) {
+            connectionSnapshotAtEntry = now
             if (SyncService.activeWs() != null) {
                 SyncService.restart(this)
             }
         }
+    }
+
+    /** 影响连接的所有设置，用来判断离开设置页后是否需要重连 */
+    private fun connectionSnapshot(): List<String> {
+        val sp = getSharedPreferences("clipsync", MODE_PRIVATE)
+        return listOf(
+            AuthClient.savedUsername(this),
+            AuthClient.savedPassword(this),
+            // 比规范化后的值，否则"补上 ws:// 前缀"这个自动回写会被误判成用户改了地址
+            ServerAddress.normalize(sp.getString("server", "") ?: ""),
+            PayloadCipher.isEnabled(this).toString(),
+            PayloadCipher.syncPassword(this)
+        )
     }
 }
