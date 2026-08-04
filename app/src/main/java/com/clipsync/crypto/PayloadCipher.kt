@@ -22,16 +22,25 @@ object PayloadCipher {
     private const val KEY_SYNC_PASSWORD = "sync_password"
     private const val KEY_E2EE_ENABLED = "e2ee_enabled"
 
+    /** 密钥缓存最多留几把（够覆盖"连接在用的"+"设置页正在试的"） */
+    private const val MAX_CACHED_KEYS = 4
+
     private val json = Json {
         encodeDefaults = false
         ignoreUnknownKeys = true
     }
 
-    @Volatile
-    private var cachedPassword: String? = null
-
-    @Volatile
-    private var cachedKey: ByteArray? = null
+    /**
+     * 已派生密钥缓存，key 是同步密码。
+     *
+     * 用多槽而不是单槽：设置页一边打字算指纹、连接一边在发消息，单槽会被
+     * 打字过程反复挤掉，导致每条消息都重新派生。密钥是密码的纯函数（盐写死
+     * 在 E2EECrypto 里），所以缓存不需要失效，只需要限制条数。
+     */
+    private val keyCache = object : LinkedHashMap<String, ByteArray>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ByteArray>) =
+            size > MAX_CACHED_KEYS
+    }
 
     private val lock = Any()
 
@@ -43,9 +52,11 @@ object PayloadCipher {
             .getString(KEY_SYNC_PASSWORD, "") ?: ""
 
     fun setSyncPassword(ctx: Context, password: String) {
+        // 值没变就别动：边打字边调用时，无脑清缓存会让每个按键都重新跑
+        // 20 万轮 PBKDF2，输入框直接卡住
+        if (syncPassword(ctx) == password) return
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putString(KEY_SYNC_PASSWORD, password).apply()
-        invalidateKeyCache()
     }
 
     fun isEnabled(ctx: Context): Boolean =
@@ -80,21 +91,17 @@ object PayloadCipher {
 
     fun keyFor(password: String): ByteArray? {
         if (password.isEmpty()) return null
-        synchronized(lock) {
-            val cached = cachedKey
-            if (cached != null && cachedPassword == password) return cached
-            val derived = E2EECrypto.deriveKey(password) ?: return null
-            cachedPassword = password
-            cachedKey = derived
-            return derived
-        }
+        synchronized(lock) { keyCache[password] }?.let { return it }
+        // 派生放在锁外：单次要跑 20 万轮 PBKDF2（手机上约 2.8 秒），持锁会把
+        // 正在发消息的线程一起堵住。并发算同一个密码最多白跑一次，无副作用。
+        val derived = E2EECrypto.deriveKey(password) ?: return null
+        synchronized(lock) { keyCache[password] = derived }
+        return derived
     }
 
+    /** 清空密钥缓存（仅测试 / 排查用；正常运行不需要，密钥是密码的纯函数）。 */
     fun invalidateKeyCache() {
-        synchronized(lock) {
-            cachedPassword = null
-            cachedKey = null
-        }
+        synchronized(lock) { keyCache.clear() }
     }
 
     /** 当前密钥指纹，设置页展示用 */

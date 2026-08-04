@@ -8,6 +8,7 @@ import android.text.method.PasswordTransformationMethod
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
+import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
@@ -18,6 +19,9 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
 import com.clipsync.BuildConfig
 import com.clipsync.R
 import com.clipsync.clipboard.ClipboardManagerHelper
@@ -41,6 +45,14 @@ class FuncSettingsActivity : AppCompatActivity() {
      * 内容：用户名、登录密码、服务器地址、加密开关、同步密码。
      */
     private var connectionSnapshotAtEntry: List<String> = emptyList()
+
+    /**
+     * 指纹计算任务。
+     *
+     * 派生密钥是 20 万轮 PBKDF2，在主线程上跑会让密码框每敲一个字符卡一下。
+     * 所以挪到后台协程，并且下一次输入会取消上一次还没跑完的计算。
+     */
+    private var fingerprintJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -158,18 +170,43 @@ class FuncSettingsActivity : AppCompatActivity() {
             hint = "同步密码（留空则用内置默认密码）"
             setText(PayloadCipher.syncPassword(this@FuncSettingsActivity))
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            setSingleLine()
             background = roundedBg(0xFFF3F4F6.toInt(), 12f)
             setPadding(24, 20, 24, 20)
         }
-        syncPwdEdit.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun afterTextChanged(s: Editable?) {
-                PayloadCipher.setSyncPassword(this@FuncSettingsActivity, s?.toString() ?: "")
+
+        // 同步密码不随打字保存：派生一次是 20 万轮 PBKDF2，边敲边算会卡住输入框。
+        // 用户点「确定」（或输入法回车）才落库并重算指纹。
+        val applySyncPwd = {
+            val typed = syncPwdEdit.text.toString()
+            if (typed == PayloadCipher.syncPassword(this)) {
+                toast("同步密码未改动")
+            } else {
+                PayloadCipher.setSyncPassword(this, typed)
+                refreshFingerprint(fingerprintText)
+                toast(if (typed.isEmpty()) "已清空，将使用内置默认密码" else "同步密码已保存")
+            }
+        }
+        syncPwdEdit.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                applySyncPwd()
+                true
+            } else {
+                false
+            }
+        }
+        // 未保存提示：让用户明白光打字不生效，得点确定
+        syncPwdEdit.addTextChangedListener(afterTextChanged {
+            val dirty = syncPwdEdit.text.toString() != PayloadCipher.syncPassword(this)
+            if (dirty) {
+                fingerprintText.text = "同步密码已修改，点「确定」后生效"
+                fingerprintText.setTextColor(0xFFD97706.toInt())
+            } else {
                 refreshFingerprint(fingerprintText)
             }
         })
-        val syncPwdRow = passwordRow(syncPwdEdit)
+        val syncPwdRow = passwordRow(syncPwdEdit, onConfirm = applySyncPwd)
 
         val e2eeCb = CheckBox(this).apply {
             text = "启用端到端加密（服务端只转发密文）"
@@ -252,24 +289,37 @@ class FuncSettingsActivity : AppCompatActivity() {
      * 三种情况：关闭（明文）、启用但没填密码（内置默认密码）、启用且填了密码。
      */
     private fun refreshFingerprint(view: TextView) {
+        fingerprintJob?.cancel()
+
         if (!PayloadCipher.isEnabled(this)) {
             view.text = "加密已关闭：消息以明文传输"
             view.setTextColor(0xFF6B7280.toInt())
             return
         }
-        val fp = PayloadCipher.fingerprint(PayloadCipher.effectivePassword(this))
-        if (PayloadCipher.usingBuiltinPassword(this)) {
-            view.text = "未填同步密码，正在使用内置默认密码（各端通用，强度低于自设密码）" +
-                if (fp != null) "\n密钥指纹 $fp" else ""
-            view.setTextColor(0xFFD97706.toInt())
-            return
-        }
-        view.text = if (fp != null) {
-            "使用自设同步密码 · 密钥指纹 $fp（两端一致才能互相解密）"
+
+        // 状态文案先立刻显示，指纹是慢活儿，算完再往后面补
+        val builtin = PayloadCipher.usingBuiltinPassword(this)
+        val prefix = if (builtin) {
+            "未填同步密码，正在使用内置默认密码（各端通用，强度低于自设密码）"
         } else {
-            "同步密码无法派生密钥，请换一个密码"
+            "使用自设同步密码"
         }
-        view.setTextColor(0xFF059669.toInt())
+        view.text = "$prefix\n密钥指纹计算中…"
+        view.setTextColor(if (builtin) 0xFFD97706.toInt() else 0xFF059669.toInt())
+
+        val password = PayloadCipher.effectivePassword(this)
+        fingerprintJob = lifecycleScope.launch {
+            val fp = withContext(Dispatchers.Default) {
+                // 单次派生在手机上实测约 2.8 秒（20 万轮 PBKDF2），必须离开主线程。
+                // 只在密码确认保存时才走到这里，不会被打字过程反复触发。
+                PayloadCipher.fingerprint(password)
+            }
+            view.text = when {
+                fp == null -> "$prefix\n无法派生密钥，请换一个密码"
+                builtin -> "$prefix\n密钥指纹 $fp"
+                else -> "$prefix · 密钥指纹 $fp（两端一致才能互相解密）"
+            }
+        }
     }
 
     private fun toast(msg: String) {
@@ -342,8 +392,11 @@ class FuncSettingsActivity : AppCompatActivity() {
      *
      * 用 transformationMethod 而不是改 inputType：后者会让输入法重置状态，
      * 已输入内容的字体也可能跳变。切换后要把光标挪回末尾，否则会跳到开头。
+     *
+     * 传了 onConfirm 就在眼睛右边再加一个「确定」按钮，用于那些"保存代价很高、
+     * 不能边打字边保存"的输入框（同步密码要跑 20 万轮 PBKDF2）。
      */
-    private fun passwordRow(edit: EditText): LinearLayout {
+    private fun passwordRow(edit: EditText, onConfirm: (() -> Unit)? = null): LinearLayout {
         val eye = ImageButton(this).apply {
             setImageResource(R.drawable.ic_eye_off)
             background = null
@@ -378,6 +431,25 @@ class FuncSettingsActivity : AppCompatActivity() {
                     LinearLayout.LayoutParams.WRAP_CONTENT
                 )
             )
+            if (onConfirm != null) {
+                val confirm = Button(this@FuncSettingsActivity).apply {
+                    text = "确定"
+                    textSize = 13f
+                    minWidth = 0
+                    minimumWidth = 0
+                    setPadding(28, 0, 28, 0)
+                    background = roundedBg(0xFF8B5CF6.toInt(), 12f)
+                    setTextColor(0xFFFFFFFF.toInt())
+                    setOnClickListener { onConfirm() }
+                }
+                addView(
+                    confirm,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { marginStart = 12 }
+                )
+            }
         }
     }
 

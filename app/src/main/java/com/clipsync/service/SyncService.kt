@@ -243,6 +243,15 @@ class SyncService : Service() {
         ws = wsClient
         currentWs = wsClient
 
+        // 预热密钥：派生一次要 2 秒多，放到后台先算好，免得第一条消息发送时
+        // 在业务线程上顶着这段延迟（PayloadCipher 内部按密码缓存结果）
+        if (syncPassword.isNotEmpty()) {
+            serviceScope.launch(Dispatchers.Default) {
+                com.clipsync.crypto.PayloadCipher.keyFor(syncPassword)
+                Log.i("ClipSync", "🔑 端到端加密密钥已就绪")
+            }
+        }
+
         // 绑定 ws 客户端，但不要重复 init（MainActivity 已经初始化过 clipboardManager）
         ClipboardManagerHelper.bindWs(wsClient)
         ClipboardManagerHelper.startListening()
