@@ -56,6 +56,20 @@ class SyncService : Service() {
 
         /** 回前台时调用：让 WS 跳过退避等待立即重连 */
         fun kick() { currentWs?.kick() }
+
+        /**
+         * 重启同步服务：登录 / 退出登录 / 改同步密码后调用，
+         * 让新的 token 和加密密钥生效（连接参数是在 onCreate 时读取的）。
+         */
+        fun restart(ctx: android.content.Context) {
+            val intent = Intent(ctx, SyncService::class.java)
+            ctx.stopService(intent)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ctx.startForegroundService(intent)
+            } else {
+                ctx.startService(intent)
+            }
+        }
     }
 
     private var ws: WsClient? = null
@@ -97,10 +111,11 @@ class SyncService : Service() {
         }
         val sp = getSharedPreferences("clipsync", MODE_PRIVATE)
         val server = sp.getString("server", null) ?: com.clipsync.BuildConfig.DEFAULT_SERVER
-        val token = sp.getString("token", null) ?: com.clipsync.BuildConfig.DEFAULT_TOKEN
+        // token 不再手填：由登录接口签发后写入 SharedPreferences
+        val token = sp.getString("token", null).orEmpty()
         Log.i("ClipSync", "→ 正在连接: $server")
         if (token.isBlank()) {
-            Log.w("ClipSync", "✗ 未配置 token，无法连接")
+            Log.w("ClipSync", "✗ 尚未登录，无法连接（请在设置里用用户名密码登录）")
             ConnectionBus.publish(ConnectionBus.STATE_CLOSED)
             return
         }
@@ -108,7 +123,13 @@ class SyncService : Service() {
         ConnectionBus.publish(ConnectionBus.STATE_CONNECTING)
 
         val deviceID = UUID.randomUUID().toString()
-        val wsClient = WsClient(server, token, deviceID).also { it.start() }
+        // 加密开启且密码非空时传入同步密码；空串表示走明文
+        val syncPassword = if (com.clipsync.crypto.PayloadCipher.isActive(this)) {
+            com.clipsync.crypto.PayloadCipher.syncPassword(this)
+        } else {
+            ""
+        }
+        val wsClient = WsClient(server, token, deviceID, syncPassword).also { it.start() }
         ws = wsClient
         currentWs = wsClient
 

@@ -12,7 +12,8 @@ val localProps = Properties().apply {
     if (f.exists()) f.inputStream().use { load(it) }
 }
 val defaultServer = localProps.getProperty("clipsync.server", "ws://192.168.1.1:8080")
-val defaultToken = localProps.getProperty("clipsync.token", "")
+// token 不再由构建期注入：改为登录接口签发。这里只保留一个默认用户名方便本地联调。
+val defaultUsername = localProps.getProperty("clipsync.username", "")
 
 android {
     namespace = "com.clipsync"
@@ -27,7 +28,7 @@ android {
 
         // 把默认配置作为 BuildConfig 常量注入到代码里
         buildConfigField("String", "DEFAULT_SERVER", "\"$defaultServer\"")
-        buildConfigField("String", "DEFAULT_TOKEN", "\"$defaultToken\"")
+        buildConfigField("String", "DEFAULT_USERNAME", "\"$defaultUsername\"")
     }
 
     buildFeatures {
@@ -75,4 +76,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+
+    // 端到端加密的跨端一致性测试（纯 JVM，不需要设备）
+    testImplementation("junit:junit:4.13.2")
 }

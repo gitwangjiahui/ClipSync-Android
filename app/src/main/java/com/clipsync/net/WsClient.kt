@@ -1,6 +1,7 @@
 package com.clipsync.net
 
 import android.util.Log
+import com.clipsync.crypto.PayloadCipher
 import com.clipsync.model.ClientRole
 import com.clipsync.model.Message
 import com.clipsync.model.MessagePayload
@@ -29,11 +30,16 @@ import java.util.concurrent.TimeUnit
 /**
  * WebSocket 长连接客户端：负责连到 ClipSync-Server，发消息、收消息、断线重连。
  * Android 客户端以 role=mobile 注册。
+ *
+ * 端到端加密：syncPassword 非空时，发送前把 payload 换成加密信封，
+ * 收到密文时用同一密码解开。服务端只转发密文，看不到内容。
  */
 class WsClient(
     private val serverUrl: String,
     private val token: String,
-    private val deviceID: String
+    private val deviceID: String,
+    /** 端到端加密的同步密码；空串表示不加密 */
+    private val syncPassword: String = ""
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
@@ -51,6 +57,14 @@ class WsClient(
     /** 连接状态流（StateFlow 保证新订阅者立即拿到当前状态） */
     private val _state = MutableStateFlow(State.CLOSED)
     val state: StateFlow<State> = _state
+
+    /** token 失效时置位，UI 据此提示重新登录 */
+    private val _authFailed = MutableStateFlow(false)
+    val authFailed: StateFlow<Boolean> = _authFailed
+
+    /** 收到解不开的密文（两端密码不一致）时置位 */
+    private val _decryptFailed = MutableStateFlow(false)
+    val decryptFailed: StateFlow<Boolean> = _decryptFailed
 
     enum class State { CONNECTING, OPEN, CLOSED }
 
@@ -131,12 +145,17 @@ class WsClient(
             override fun onMessage(webSocket: WebSocket, text: String) {
                 runCatching {
                     val msg = json.decodeFromString<Message>(text)
-                    _incoming.tryEmit(msg)
+                    _incoming.tryEmit(decryptIncoming(msg) ?: return)
                 }.onFailure { Log.w("ClipSync", "✗ 消息解析失败: ${it.message}") }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.w("ClipSync", "✗ 连接失败: ${t.message}")
+                // 服务端在 token 失效时用 401 拒绝 WS 升级
+                if (response?.code == 401) {
+                    Log.w("ClipSync", "🔒 token 已失效，需要重新登录")
+                    _authFailed.value = true
+                }
                 _state.value = State.CLOSED
                 if (!closed.isCompleted) closed.complete(Unit)
             }
@@ -170,19 +189,26 @@ class WsClient(
         kind: String? = null,
         to: String = "*"
     ): Boolean {
+        val plainPayload = MessagePayload(
+            text = payloadText,
+            data = payloadData,
+            mime = mime,
+            preview = preview,
+            kind = kind
+        )
+        // 加密开启时，服务端只会看到信封；关闭时保持原有明文行为
+        val outgoingPayload = if (syncPassword.isNotEmpty()) {
+            PayloadCipher.encrypt(plainPayload, syncPassword)
+        } else {
+            plainPayload
+        }
         val msg = Message(
             id = UUID.randomUUID().toString(),
             type = type,
             from = deviceID,
             to = to,
             ts = System.currentTimeMillis() / 1000,
-            payload = MessagePayload(
-                text = payloadText,
-                data = payloadData,
-                mime = mime,
-                preview = preview,
-                kind = kind
-            )
+            payload = outgoingPayload
         )
         val raw = json.encodeToString(msg)
         val sent = ws?.send(raw)
@@ -208,6 +234,30 @@ class WsClient(
         }
         if (toSend.isNotEmpty()) {
             Log.i("ClipSync", "↑ 重发暂存消息 $success/${toSend.size} 条")
+        }
+    }
+
+    /**
+     * 解密收到的消息。
+     * @return 可交给上层的明文消息；解不开时返回 null（不把密文塞进历史）
+     */
+    private fun decryptIncoming(msg: Message): Message? {
+        if (msg.payload.enc == null) return msg
+        return when (val outcome = PayloadCipher.decrypt(msg.payload, syncPassword)) {
+            is PayloadCipher.Outcome.Plaintext -> msg
+            is PayloadCipher.Outcome.Decrypted -> {
+                _decryptFailed.value = false
+                msg.copy(payload = outcome.payload)
+            }
+            is PayloadCipher.Outcome.Failed -> {
+                val local = PayloadCipher.fingerprint(syncPassword) ?: "未设置"
+                Log.w(
+                    "ClipSync",
+                    "✗ 解密失败：对端 key=${outcome.fingerprint} 本机 key=$local（请检查同步密码是否一致）"
+                )
+                _decryptFailed.value = true
+                null
+            }
         }
     }
 }

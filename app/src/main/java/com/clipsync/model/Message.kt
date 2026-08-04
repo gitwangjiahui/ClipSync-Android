@@ -67,7 +67,10 @@ data class MessagePayload(
     val mime: String? = null,
     val data: String? = null,      // base64（图片等二进制）
     val preview: String? = null,   // 短预览
-    val kind: String? = null       // 业务子类型：sms_code / text / image / share ...
+    val kind: String? = null,      // 业务子类型：sms_code / text / image / share ...
+    val sender: String? = null,    // 短信发件人（服务端清洗后填入）
+    /** 加密信封；非空时 text/data 为空，真实内容在 enc.ct 里 */
+    val enc: com.clipsync.crypto.EncEnvelope? = null
 )
 
 @Serializable
