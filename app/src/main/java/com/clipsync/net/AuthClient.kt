@@ -14,6 +14,9 @@ import java.util.concurrent.TimeUnit
 /**
  * 用用户名 + 密码换 token，取代原来"手填 Token"的流程。
  *
+ * 客户端没有登录 / 注册按钮：账号密码存在本地，连接时自动换 token。
+ * 账号由管理员在服务端创建（后续做后台管理界面）。
+ *
  * 服务端行为：
  *  - 当前账号没有客户端在线 → 新签发 token
  *  - 已有客户端在线 → 返回同一个 token（reused = true）
@@ -78,15 +81,6 @@ object AuthClient {
             )
         }
 
-    suspend fun register(serverUrl: String, username: String, password: String) =
-        withContext(Dispatchers.IO) {
-            val body = JSONObject()
-                .put("username", username)
-                .put("password", password)
-            post(serverUrl, "/auth/register", body, token = null)
-            Unit
-        }
-
     /** GET /auth/session —— 启动时确认本地 token 还有效 */
     suspend fun checkSession(serverUrl: String, token: String): Boolean =
         withContext(Dispatchers.IO) {
@@ -116,6 +110,26 @@ object AuthClient {
     fun savedUsername(ctx: Context): String =
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("username", "") ?: ""
 
+    /**
+     * 账号密码本地保存，连接时自动用它换 token，所以不需要"登录"按钮。
+     *
+     * 注意：这里存的是登录密码，和端到端加密用的"同步密码"是两码事——
+     * 后者永远不出设备，前者要发给服务端校验。
+     */
+    fun savedPassword(ctx: Context): String =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("password", "") ?: ""
+
+    fun saveCredentials(ctx: Context, username: String, password: String) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString("username", username)
+            .putString("password", password)
+            .apply()
+    }
+
+    /** 账号密码都填了才能自动登录 */
+    fun hasCredentials(ctx: Context): Boolean =
+        savedUsername(ctx).isNotEmpty() && savedPassword(ctx).isNotEmpty()
+
     fun saveSession(ctx: Context, session: Session) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString("token", session.token)
@@ -130,6 +144,38 @@ object AuthClient {
     }
 
     fun isLoggedIn(ctx: Context): Boolean = savedToken(ctx).isNotEmpty()
+
+    /**
+     * 连接前拿一个可用 token：本地有就直接用，没有就用保存的账号密码登录。
+     *
+     * 只在本地没有 token 时才打 /auth/login，避免每次重连都去撞登录限流；
+     * token 失效的场景由 WS 握手返回 401 触发 [clearSession] + 重连来兜住。
+     *
+     * @return 可用的 token；账号密码没填或登录失败时返回 null
+     */
+    suspend fun ensureToken(ctx: Context, serverUrl: String): String? {
+        savedToken(ctx).takeIf { it.isNotEmpty() }?.let { return it }
+
+        val username = savedUsername(ctx)
+        val password = savedPassword(ctx)
+        if (username.isEmpty() || password.isEmpty()) {
+            Log.w("ClipSync", "✗ 未填写账号密码，无法连接")
+            return null
+        }
+        return try {
+            val session = login(serverUrl, username, password)
+            saveSession(ctx, session)
+            val how = if (session.reused)
+                "复用在线 Token（${session.onlineDevices} 台设备在线）"
+            else
+                "已签发新 Token"
+            Log.i("ClipSync", "🔑 连接前自动登录成功：$how")
+            session.token
+        } catch (e: Exception) {
+            Log.w("ClipSync", "✗ 自动登录失败: ${e.message}")
+            null
+        }
+    }
 
     // ===== 内部 =====
 

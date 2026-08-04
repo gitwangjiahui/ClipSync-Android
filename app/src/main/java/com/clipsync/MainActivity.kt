@@ -379,10 +379,9 @@ class MainActivity : AppCompatActivity() {
     private fun renderTarget() {
         val sp = getSharedPreferences("clipsync", MODE_PRIVATE)
         val server = sp.getString("server", null) ?: com.clipsync.BuildConfig.DEFAULT_SERVER
-        // token 由登录接口签发；为空说明还没登录
-        val token = sp.getString("token", null).orEmpty()
-        val tokenTip = if (token.isBlank()) "  ·  ⚠ 未登录" else ""
-        targetText.text = "🔗  $server$tokenTip"
+        // 账号密码没填就连不上；token 由连接时自动换取，不需要用户关心
+        val tip = if (com.clipsync.net.AuthClient.hasCredentials(this)) "" else "  ·  ⚠ 未填写账号密码"
+        targetText.text = "🔗  $server$tip"
     }
 
     // MARK: - 剪贴板预览（修复图片显示）

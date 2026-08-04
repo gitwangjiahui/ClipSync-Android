@@ -17,6 +17,7 @@ import com.clipsync.accessibility.ClipSyncAccessibilityService
 import com.clipsync.clipboard.ClipboardManagerHelper
 import com.clipsync.history.HistoryStore
 import com.clipsync.model.MessageType
+import com.clipsync.net.AuthClient
 import com.clipsync.net.WsClient
 import com.clipsync.state.ConnectionBus
 import kotlinx.coroutines.CoroutineScope
@@ -77,6 +78,7 @@ class SyncService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var incomingJob: Job? = null
     private var stateJob: Job? = null
+    private var authJob: Job? = null
 
     /** 是否曾经进入过 CONNECTING/OPEN；用于区分"服务刚起、还没连"和"已连过又断了" */
     private var hasBeenConnectingOrOpen: Boolean = false
@@ -111,16 +113,33 @@ class SyncService : Service() {
         }
         val sp = getSharedPreferences("clipsync", MODE_PRIVATE)
         val server = sp.getString("server", null) ?: com.clipsync.BuildConfig.DEFAULT_SERVER
-        // token 不再手填：由登录接口签发后写入 SharedPreferences
-        val token = sp.getString("token", null).orEmpty()
         Log.i("ClipSync", "→ 正在连接: $server")
-        if (token.isBlank()) {
-            Log.w("ClipSync", "✗ 尚未登录，无法连接（请在设置里用用户名密码登录）")
+
+        if (!AuthClient.isLoggedIn(this) && !AuthClient.hasCredentials(this)) {
+            Log.w("ClipSync", "✗ 尚未填写账号密码，无法连接（请在设置里填写）")
             ConnectionBus.publish(ConnectionBus.STATE_CLOSED)
             return
         }
-        // 立即通知 UI 进入连接中状态
+
+        // 立即通知 UI 进入连接中状态：换 token 也算连接过程的一部分
         ConnectionBus.publish(ConnectionBus.STATE_CONNECTING)
+
+        // 没有 token 就先用账号密码换一个，所以不需要单独的"登录"按钮。
+        // 这一步走网络，必须在协程里做，不能阻塞 onCreate。
+        serviceScope.launch {
+            val token = AuthClient.ensureToken(this@SyncService, server)
+            if (token.isNullOrBlank()) {
+                Log.w("ClipSync", "✗ 账号密码校验失败，连接中止")
+                ConnectionBus.publish(ConnectionBus.STATE_CLOSED)
+                return@launch
+            }
+            openWs(server, token)
+        }
+    }
+
+    /** 拿到 token 后真正建立 WebSocket 连接 */
+    private fun openWs(server: String, token: String) {
+        if (ws != null) return
 
         val deviceID = UUID.randomUUID().toString()
         // 加密开启且密码非空时传入同步密码；空串表示走明文
@@ -140,6 +159,40 @@ class SyncService : Service() {
 
         subscribeIncoming(wsClient)
         subscribeState(wsClient)
+        subscribeAuthFailure(wsClient, server)
+    }
+
+    /**
+     * token 失效（WS 握手被 401 拒）时自动重新登录一次。
+     *
+     * 密码存在本地，所以这里能悄悄换一个新 token 接着连，用户不用管。
+     * 若重新登录也失败（比如密码被改了），就停在未连接状态等用户去改设置。
+     */
+    private fun subscribeAuthFailure(wsClient: WsClient, server: String) {
+        authJob?.cancel()
+        authJob = serviceScope.launch {
+            wsClient.authFailed.collect { failed ->
+                if (!failed) return@collect
+                Log.w("ClipSync", "🔒 token 失效，尝试用已保存的账号密码重新登录")
+                AuthClient.clearSession(this@SyncService)
+                if (!AuthClient.hasCredentials(this@SyncService)) {
+                    Log.w("ClipSync", "✗ 无账号密码可用，请到设置里填写")
+                    ConnectionBus.publish(ConnectionBus.STATE_CLOSED)
+                    return@collect
+                }
+                val fresh = AuthClient.ensureToken(this@SyncService, server)
+                if (fresh.isNullOrBlank()) {
+                    Log.w("ClipSync", "✗ 重新登录失败，停止重连")
+                    ConnectionBus.publish(ConnectionBus.STATE_CLOSED)
+                    return@collect
+                }
+        // 换掉旧连接，用新 token 重新建立
+                ws?.stop()
+                ws = null
+                currentWs = null
+                openWs(server, fresh)
+            }
+        }
     }
 
     /** 订阅 WS 状态，实时更新通知栏 + 广播给 UI */
@@ -374,6 +427,7 @@ class SyncService : Service() {
         Log.i("ClipSync", "⚪ 同步服务已停止")
         incomingJob?.cancel()
         stateJob?.cancel()
+        authJob?.cancel()
         serviceScope.coroutineContext[Job]?.cancel()
         ws?.stop()
         ws = null

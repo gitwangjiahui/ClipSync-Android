@@ -27,9 +27,13 @@ import kotlinx.coroutines.launch
  * 功能设置页：服务器地址、账号登录（用户名/密码换 Token）、
  * 端到端加密同步密码、剪贴板同步开关。
  *
- * Token 不再手填：登录成功后由服务端签发并写入 SharedPreferences。
+ * 没有登录 / 注册按钮：账号密码存在本地，连接时自动换 token。
+ * 账号由管理员在服务端创建（后续做后台管理界面）。
  */
 class FuncSettingsActivity : AppCompatActivity() {
+
+    /** 进入本页时的账号密码，离开时用来判断要不要重连 */
+    private var credentialsAtEntry: Pair<String, String> = "" to ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -69,6 +73,7 @@ class FuncSettingsActivity : AppCompatActivity() {
         }
         val passwordEdit = EditText(this).apply {
             hint = "密码"
+            setText(AuthClient.savedPassword(this@FuncSettingsActivity))
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             background = roundedBg(0xFFF3F4F6.toInt(), 12f)
             setPadding(24, 20, 24, 20)
@@ -76,7 +81,7 @@ class FuncSettingsActivity : AppCompatActivity() {
         connCard.addView(usernameEdit, marginParams(12))
         connCard.addView(passwordEdit, marginParams(12))
 
-        // 登录状态提示：已登录显示账号名，未登录提示先登录
+        // 状态提示：账密是否填全、当前是否已拿到 token
         val statusText = TextView(this).apply {
             textSize = 13f
             setPadding(0, 0, 0, 12)
@@ -84,78 +89,20 @@ class FuncSettingsActivity : AppCompatActivity() {
         connCard.addView(statusText)
         refreshLoginStatus(statusText)
 
-        val loginBtn = Button(this).apply { text = "登录" }
-        val registerBtn = Button(this).apply { text = "注册" }
-        val logoutBtn = Button(this).apply { text = "退出登录" }
-
-        loginBtn.setOnClickListener {
+        // 账号密码边填边存，连接时自动校验，所以没有「登录」按钮。
+        // 改了账号或密码就作废本地旧 token，否则下次连接还会拿旧身份去连。
+        val onCredentialChanged = {
             val name = usernameEdit.text.toString().trim()
             val pwd = passwordEdit.text.toString()
-            if (name.isEmpty() || pwd.isEmpty()) {
-                toast("请填写用户名和密码")
-                return@setOnClickListener
+            if (name != AuthClient.savedUsername(this) || pwd != AuthClient.savedPassword(this)) {
+                AuthClient.clearSession(this)
             }
-            loginBtn.isEnabled = false
-            lifecycleScope.launch {
-                try {
-                    val session = AuthClient.login(
-                        serverEdit.text.toString().trim(), name, pwd
-                    )
-                    AuthClient.saveSession(this@FuncSettingsActivity, session)
-                    passwordEdit.setText("")
-                    toast(
-                        if (session.reused)
-                            "登录成功：已有 ${session.onlineDevices} 台设备在线，复用同一 Token"
-                        else
-                            "登录成功：已签发新 Token"
-                    )
-                    refreshLoginStatus(statusText)
-                    // 重启同步服务，让新 token 生效
-                    SyncService.restart(this@FuncSettingsActivity)
-                } catch (e: Exception) {
-                    toast(e.message ?: "登录失败")
-                } finally {
-                    loginBtn.isEnabled = true
-                }
-            }
-        }
-
-        registerBtn.setOnClickListener {
-            val name = usernameEdit.text.toString().trim()
-            val pwd = passwordEdit.text.toString()
-            if (name.isEmpty() || pwd.isEmpty()) {
-                toast("请填写用户名和密码")
-                return@setOnClickListener
-            }
-            registerBtn.isEnabled = false
-            lifecycleScope.launch {
-                try {
-                    AuthClient.register(serverEdit.text.toString().trim(), name, pwd)
-                    toast("注册成功，请点「登录」")
-                } catch (e: Exception) {
-                    toast(e.message ?: "注册失败")
-                } finally {
-                    registerBtn.isEnabled = true
-                }
-            }
-        }
-
-        logoutBtn.setOnClickListener {
-            val currentServer = serverEdit.text.toString().trim()
-            val token = AuthClient.savedToken(this)
-            AuthClient.clearSession(this)
+            AuthClient.saveCredentials(this, name, pwd)
             refreshLoginStatus(statusText)
-            toast("已退出登录")
-            lifecycleScope.launch { AuthClient.logout(currentServer, token) }
         }
-
-        val btnRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            addView(loginBtn, rowItemParams())
-            addView(registerBtn, rowItemParams())
-            addView(logoutBtn, rowItemParams())
-        }
-        connCard.addView(btnRow, marginParams(12))
+        usernameEdit.addTextChangedListener(afterTextChanged(onCredentialChanged))
+        passwordEdit.addTextChangedListener(afterTextChanged(onCredentialChanged))
+        credentialsAtEntry = AuthClient.savedUsername(this) to AuthClient.savedPassword(this)
 
         val autoConnectCb = CheckBox(this).apply {
             text = "启动时自动连接并开始同步"
@@ -245,14 +192,24 @@ class FuncSettingsActivity : AppCompatActivity() {
 
     // MARK: - 状态刷新
 
-    /** 已登录显示账号名，未登录提示先登录 */
+    /**
+     * 三态提示：已拿到 token / 账密已填待连接时校验 / 账密没填全。
+     * 账号由管理员在服务端创建，客户端不提供注册入口。
+     */
     private fun refreshLoginStatus(view: TextView) {
-        if (AuthClient.isLoggedIn(this)) {
-            view.text = "已登录：${AuthClient.savedUsername(this)}（Token 由服务端签发）"
-            view.setTextColor(0xFF059669.toInt())
-        } else {
-            view.text = "未登录：请填写用户名和密码后点「登录」"
-            view.setTextColor(0xFFDC2626.toInt())
+        when {
+            AuthClient.isLoggedIn(this) -> {
+                view.text = "已登录：${AuthClient.savedUsername(this)}（Token 由服务端签发）"
+                view.setTextColor(0xFF059669.toInt())
+            }
+            AuthClient.hasCredentials(this) -> {
+                view.text = "账号密码已保存，连接时会自动校验"
+                view.setTextColor(0xFF2563EB.toInt())
+            }
+            else -> {
+                view.text = "请填写用户名和密码（账号由管理员创建）"
+                view.setTextColor(0xFFDC2626.toInt())
+            }
         }
     }
 
@@ -333,6 +290,29 @@ class FuncSettingsActivity : AppCompatActivity() {
         override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
         override fun afterTextChanged(s: Editable?) {
             sp.edit().putString(key, s?.toString()?.trim() ?: "").apply()
+        }
+    }
+
+    /** 只关心"输入完成"这一刻的 TextWatcher 简写 */
+    private fun afterTextChanged(action: () -> Unit): TextWatcher = object : TextWatcher {
+        override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+        override fun afterTextChanged(s: Editable?) = action()
+    }
+
+    /**
+     * 离开设置页时，如果账号密码变了就重启同步服务，让它用新凭据重新换 token。
+     *
+     * 放在 onPause 而不是每次输入回调里，是为了避免边打字边重连。
+     */
+    override fun onPause() {
+        super.onPause()
+        val now = AuthClient.savedUsername(this) to AuthClient.savedPassword(this)
+        if (now != credentialsAtEntry) {
+            credentialsAtEntry = now
+            if (SyncService.activeWs() != null) {
+                SyncService.restart(this)
+            }
         }
     }
 }
