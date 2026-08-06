@@ -573,22 +573,22 @@ class SyncService : Service() {
             ACTION_SEND_SMS_CODE -> {
                 val text = intent.getStringExtra(EXTRA_TEXT) ?: return START_STICKY
                 val preview = intent.getStringExtra(EXTRA_PREVIEW) ?: "短信验证码"
-                Log.i("ClipSync", "↑ 上传短信: ${text.take(40)}")
                 val wsClient = ws
                 if (wsClient == null) {
                     // 冷启动：还在换 token，连接实例都没有。暂存，连上后补发，
                     // 别让验证码消失在半路。（注意 ws 非空时不进来：WsClient.send
                     // 内部已有离线队列，这里再存一份会导致补发两遍）
                     synchronized(pendingSms) { pendingSms.add(text to preview) }
-                    Log.i("ClipSync", "⏸ 连接未就绪，短信已暂存等待补发")
+                    Log.i("ClipSync", "↑ 上传短信: ${text.take(40)} → 连接未就绪，已暂存等待补发")
                 } else {
-                    wsClient.send(
+                    val sent = wsClient.send(
                         type = MessageType.NOTIFY_PC,
                         payloadText = text,
                         mime = "text/plain",
                         preview = preview,
                         kind = "sms_code"
                     )
+                    Log.i("ClipSync", "↑ 上传短信: ${text.take(40)} → ${if (sent) "已立即发出" else "离线队列"}")
                 }
                 // 存短信历史（出）
                 HistoryStore.addSms(

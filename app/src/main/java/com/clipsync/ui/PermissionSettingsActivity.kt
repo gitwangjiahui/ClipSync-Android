@@ -37,7 +37,15 @@ class PermissionSettingsActivity : AppCompatActivity() {
         if (denied.isEmpty()) {
             toast("全部权限已授予", Design.Color.SUCCESS)
         } else {
-            toast("仍未授权：${denied.size} 项", Design.Color.WARNING)
+            // MIUI 可能"授予"了但实际 runtime 状态仍是 false（APPLY_RESTRICTION）
+            // 重新检查实际权限状态
+            val stillMissing = PermissionStatus.missingRuntimePermissions(this)
+            if (stillMissing.isNotEmpty()) {
+                toast("系统限制未能直接授权，请去系统设置手动开启", Design.Color.WARNING)
+                openAppDetails()
+            } else {
+                toast("全部权限已授予", Design.Color.SUCCESS)
+            }
         }
         render()
     }
@@ -284,7 +292,14 @@ class PermissionSettingsActivity : AppCompatActivity() {
             toast("权限已全部授予", Design.Color.SUCCESS)
             return
         }
-        permissionLauncher.launch(missing)
+        try {
+            // 先尝试系统标准授权弹窗
+            permissionLauncher.launch(missing)
+        } catch (e: Exception) {
+            // 某些 ROM 拦截了标准授权流程，退到应用详情页手动开
+            openAppDetails()
+            toast("请在系统设置中手动开启短信权限", Design.Color.NEUTRAL)
+        }
     }
 
     private fun requestIgnoreBatteryOptimization() {

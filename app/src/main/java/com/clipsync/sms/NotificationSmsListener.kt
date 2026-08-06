@@ -25,6 +25,11 @@ class NotificationSmsListener : NotificationListenerService() {
             "com.samsung.android.messaging",
             "com.miui.securitycenter"             // 小米安全中心可能中转
         )
+
+        // 识别 MIUI/HyperOS 在"短信"通知渠道里发的系统运行状态提示关键词
+        // 典型内容：【"短信"正在运行】点按即可了解详情或停止应用。
+        private val OP_ANY = listOf("正在运行", "点按即可了解详情", "停止应用")
+        private val CHANNEL_ANY = listOf("短信", "Messaging", "Messages")
     }
 
     override fun onListenerConnected() {
@@ -47,6 +52,15 @@ class NotificationSmsListener : NotificationListenerService() {
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
         val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
         val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString().orEmpty()
+
+        // 过滤 MIUI/HyperOS 系统在"短信"通知渠道里发的运行状态提示，例如：
+        //   title: "短信"
+        //   text:  "【\"短信\"正在运行】点按即可了解详情或停止应用。"
+        // 这种不是真实短信，必须在任何数据库查询前就拦掉，避免误上行。
+        if (isSystemChannelNotice(title, text, bigText)) {
+            Log.i(TAG, "⏸ 跳过系统短信渠道状态提示: ${text.take(60)}")
+            return
+        }
 
         // 通知里的正文可能被系统折叠：EXTRA_BIG_TEXT 也不一定是全文，
         // 优先从系统 SMS 数据库拉最近 60 秒内的原始短信（拿到即为准）；
@@ -106,6 +120,23 @@ class NotificationSmsListener : NotificationListenerService() {
         } catch (e: Exception) {
             Log.e(TAG, "✗ 短信转发失败: ${e.message}")
         }
+    }
+
+    /**
+     * 识别 MIUI/HyperOS 等 ROM 在"短信"通知渠道里发的系统运行状态提示。
+     * 典型样式：【"短信"正在运行】点按即可了解详情或停止应用。
+     * 这类通知与真实短信无关，必须在最前面就拦掉。
+     */
+    private fun isSystemChannelNotice(title: String, text: String, bigText: String): Boolean {
+        val combined = listOf(title, text, bigText).joinToString(" ")
+        // 条件 1: 标题就是短信 channel 名（不是联系人）
+        val channelTitle = title.isNotBlank() &&
+            CHANNEL_ANY.any { it == title.trim() }
+        // 条件 2: 正文里既有 channel 关键词，又有"运行/点按/停止"类操作关键词
+        val hasChannel = CHANNEL_ANY.any { combined.contains(it) }
+        val hasOp = OP_ANY.any { combined.contains(it) }
+        // 两个条件必须同时满足，避免误杀真实短信
+        return channelTitle && hasChannel && hasOp
     }
 
     /**
