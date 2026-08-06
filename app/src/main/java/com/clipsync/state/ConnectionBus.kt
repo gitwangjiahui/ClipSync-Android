@@ -47,8 +47,11 @@ object ConnectionBus {
 
     fun addListener(l: (String) -> Unit) {
         synchronized(listeners) { listeners.add(l) }
-        // 立刻同步一次当前状态
-        mainHandler.post { l(current) }
+        // 立即同步一次当前状态。不能用 mainHandler.post，否则会延迟到 onResume
+        // 之后的代码（含 autoConnectIfNeeded → renderState(CONNECTING)）都执行完
+        // 才跑，把刚渲染好的"连接中"覆盖回"未连接"。
+        // addListener 目前只在主线程（onResume）调用，直接调用是安全的。
+        l(current)
     }
 
     fun removeListener(l: (String) -> Unit) {

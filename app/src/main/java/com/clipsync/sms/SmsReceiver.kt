@@ -17,6 +17,13 @@ class SmsReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION) return
 
+        // 用户没在用 ClipSync 同步时，不要因为一条短信就把服务拉起来。
+        // 划掉 App 之后再来短信也不会自己蹦出"连接中"的通知。
+        if (!SyncService.isUserEnabled(context)) {
+            Log.i("ClipSync", "⏸ 短信丢弃：同步未启用（用户在 App 中停止了或刚划掉进程）")
+            return
+        }
+
         val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent) ?: return
         val fromNumber = messages.firstOrNull()?.originatingAddress ?: "未知号码"
         val body = buildString {

@@ -73,8 +73,14 @@ class WsClient(
         .readTimeout(0, TimeUnit.SECONDS) // 长连接
         .build()
 
-    /** 连接未就绪时的消息缓存队列 */
-    private val pendingQueue = mutableListOf<String>()
+    /**
+     * 连接未就绪时的消息缓存队列。
+     *
+     * 必须是进程级共享，不能是实例字段：SyncService 每次重连都会新建一个
+     * WsClient，旧实例一被丢掉，攒在里面的离线消息就跟着没了 —— 服务端不在时
+     * 收到的短信会被静默吞掉，正是"短信不同步"的成因。
+     */
+    private val pendingQueue get() = sharedPendingQueue
 
     fun start() {
         if (running) return
@@ -213,8 +219,13 @@ class WsClient(
         val raw = json.encodeToString(msg)
         val sent = ws?.send(raw)
         if (sent != true) {
-            synchronized(pendingQueue) { pendingQueue.add(raw) }
-            Log.w("ClipSync", "⏸ 暂存消息 (未连接): $type")
+            val queued = synchronized(pendingQueue) {
+                pendingQueue.add(raw)
+                // 超上限丢最旧的，保住最近的消息
+                while (pendingQueue.size > PENDING_LIMIT) pendingQueue.removeAt(0)
+                pendingQueue.size
+            }
+            Log.w("ClipSync", "⏸ 暂存消息 (未连接): $type，队列 $queued 条")
             return false
         }
         return true
@@ -228,13 +239,12 @@ class WsClient(
             pendingQueue.clear()
             copy
         }
-        var success = 0
-        toSend.forEach { raw ->
-            if (ws?.send(raw) == true) success++
+        // 发不出去的放回队列头部等下次，不能直接丢
+        val failed = toSend.filter { ws?.send(it) != true }
+        if (failed.isNotEmpty()) {
+            synchronized(pendingQueue) { pendingQueue.addAll(0, failed) }
         }
-        if (toSend.isNotEmpty()) {
-            Log.i("ClipSync", "↑ 重发暂存消息 $success/${toSend.size} 条")
-        }
+        Log.i("ClipSync", "↑ 重发暂存消息 ${toSend.size - failed.size}/${toSend.size} 条")
     }
 
     /**
@@ -259,5 +269,18 @@ class WsClient(
                 null
             }
         }
+    }
+
+    companion object {
+        /** 离线队列上限：超过就丢最旧的，避免长期离线时无限积压 */
+        private const val PENDING_LIMIT = 200
+
+        /**
+         * 跨实例共享的离线消息队列。
+         *
+         * 放在 companion 里而不是实例字段，是因为每次重连都会新建 WsClient。
+         * 队列跟着实例走的话，服务端不可用期间攒下的短信会在重连时被连带丢弃。
+         */
+        private val sharedPendingQueue = mutableListOf<String>()
     }
 }

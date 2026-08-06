@@ -33,6 +33,9 @@ class NotificationSmsListener : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
+        // 同步未启用就不拉服务，与 SmsReceiver 保持一致。
+        if (!SyncService.isUserEnabled(this)) return
+
         val pkg = sbn.packageName ?: return
         // 只处理短信 App 的通知
         val isSmsApp = SMS_APPS.contains(pkg) ||

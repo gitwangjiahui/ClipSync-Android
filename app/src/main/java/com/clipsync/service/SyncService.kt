@@ -57,8 +57,54 @@ class SyncService : Service() {
         /** 当前活跃的 WS 实例（服务没启动时为 null） */
         fun activeWs(): WsClient? = currentWs
 
+        /**
+         * 服务实例是否存活（onCreate 到 onDestroy 之间）。
+         *
+         * 注意它和 activeWs() 的区别：服务启动后要先走网络换 token，这段时间
+         * activeWs() 一直是 null，但服务明明在跑。MainActivity 判断"要不要清
+         * sync_enabled"必须看这个，否则连接建立前回一次前台就把短信同步关掉。
+         */
+        @Volatile
+        private var serviceAlive = false
+
+        fun isServiceAlive(): Boolean = serviceAlive
+
         /** 回前台时调用：让 WS 跳过退避等待立即重连 */
         fun kick() { currentWs?.kick() }
+
+        /**
+         * 用户是否希望服务运行。
+         *
+         * 用 SharedPreferences 持久化：进程被划掉、用户主动停止、杀进程后重启都能查到。
+         * 短信接收器、通知监听器在收到短信时先看这个标记：
+         *   - true  → 拉起服务，正常上行
+         *   - false → 直接丢弃，不拉服务（用户没要同步就别骚扰他）
+         */
+        @Volatile
+        private var userEnabledCache: Boolean? = null
+
+        fun isUserEnabled(ctx: android.content.Context): Boolean {
+            userEnabledCache?.let { return it }
+            val v = ctx.getSharedPreferences("clipsync", MODE_PRIVATE)
+                .getBoolean("sync_enabled", false)
+            userEnabledCache = v
+            return v
+        }
+
+        fun setUserEnabled(ctx: android.content.Context, enabled: Boolean) {
+            userEnabledCache = enabled
+            ctx.getSharedPreferences("clipsync", MODE_PRIVATE)
+                .edit().putBoolean("sync_enabled", enabled).apply()
+        }
+
+        /**
+         * 连接还没建好时收到的短信暂存队列（text 到 preview）。
+         *
+         * 场景：划掉 App 后来短信，SmsReceiver 冷启动本服务，此时还在走网络
+         * 换 token，ws 是 null。若直接 send 会被吞掉，这条验证码就永远发不出去。
+         * 先进队列，连接 OPEN 后统一补发。
+         */
+        private val pendingSms = mutableListOf<Pair<String, String>>()
 
         /**
          * 重启同步服务：登录 / 退出登录 / 改同步密码后调用，
@@ -112,6 +158,7 @@ class SyncService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        serviceAlive = true
         Log.i("ClipSync", "🟢 同步服务已启动")
         startForeground(buildNotification(ConnectionBus.STATE_CONNECTING))
         acquireWakeLock()
@@ -148,14 +195,21 @@ class SyncService : Service() {
     }
 
     private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
             "ClipSync::SyncServiceWakeLock"
         ).apply {
             setReferenceCounted(false)
-            acquire()
+            // 10 分钟兜底：任意一次退避最多 30s，正常情况会在 releaseWakeLock
+            // 主动释放；带超时的目的是即便代码路径有 bug，也不会无限制持锁
+            acquire(10 * 60 * 1000L)
         }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { if (it.isHeld) it.release() }
     }
 
     private fun connectWs() {
@@ -228,6 +282,21 @@ class SyncService : Service() {
         nm?.notify(NOTIFICATION_ID, buildNotification(ConnectionBus.STATE_CLOSED))
     }
 
+    /**
+     * 本机设备 ID：首次生成后持久化，之后一直复用。
+     *
+     * 不能每次建连都随机：服务端按 device_id 在 Redis 里登记在线设备，ID 一直变
+     * 会堆出一串再也不会下线的幽灵设备，在线数虚高，进而影响登录时"复用还是
+     * 新签发 Token"的判断。
+     */
+    private fun stableDeviceID(): String {
+        val sp = getSharedPreferences("clipsync", MODE_PRIVATE)
+        sp.getString("device_id", null)?.takeIf { it.isNotBlank() }?.let { return it }
+        val fresh = UUID.randomUUID().toString()
+        sp.edit().putString("device_id", fresh).apply()
+        return fresh
+    }
+
     /** 拿到 token 后真正建立 WebSocket 连接 */
     private fun openWs(server: String, token: String) {
         // 服务已被销毁（用户点了取消）就别再建连，否则留下一个没人回收的连接
@@ -236,7 +305,7 @@ class SyncService : Service() {
             return
         }
 
-        val deviceID = UUID.randomUUID().toString()
+        val deviceID = stableDeviceID()
         // 加密开启时用有效密码（用户没填就是内置默认密码）；关闭时空串走明文
         val syncPassword = com.clipsync.crypto.PayloadCipher.effectivePassword(this)
         val wsClient = WsClient(server, token, deviceID, syncPassword).also { it.start() }
@@ -328,6 +397,15 @@ class SyncService : Service() {
                 val nm = getSystemService(NotificationManager::class.java)
                 nm?.notify(NOTIFICATION_ID, buildNotification(state))
 
+                // 连上了立刻放 WakeLock，让系统正常休眠；
+                // 转入 CONNECTING 时重新申请，托住退避等待
+                if (s == WsClient.State.OPEN) {
+                    releaseWakeLock()
+                    flushPendingSms()
+                } else if (s == WsClient.State.CONNECTING) {
+                    acquireWakeLock()
+                }
+
                 // 断线不杀服务：WsClient 内部有指数退避自动重连，
                 // 回前台时 MainActivity 会 kick 加速重连
                 if (s == WsClient.State.CONNECTING || s == WsClient.State.OPEN) {
@@ -335,6 +413,31 @@ class SyncService : Service() {
                 }
             }
         }
+    }
+
+    /** 连接就绪后补发暂存的短信（冷启动时收到的那批） */
+    private fun flushPendingSms() {
+        val wsClient = ws ?: return
+        val toSend = synchronized(pendingSms) {
+            if (pendingSms.isEmpty()) return
+            val copy = pendingSms.toList()
+            pendingSms.clear()
+            copy
+        }
+        var ok = 0
+        toSend.forEach { (text, preview) ->
+            // 发送失败不用塞回 pendingSms：WsClient.send 内部有离线队列，
+            // 下次连上它自己会重发，这里再存一份会重复
+            val sent = wsClient.send(
+                type = MessageType.NOTIFY_PC,
+                payloadText = text,
+                mime = "text/plain",
+                preview = preview,
+                kind = "sms_code"
+            )
+            if (sent) ok++
+        }
+        Log.i("ClipSync", "↑ 补发暂存短信 $ok/${toSend.size} 条")
     }
 
     /** 收到消息 → 自动写入本机剪贴板 + 存历史 */
@@ -471,13 +574,22 @@ class SyncService : Service() {
                 val text = intent.getStringExtra(EXTRA_TEXT) ?: return START_STICKY
                 val preview = intent.getStringExtra(EXTRA_PREVIEW) ?: "短信验证码"
                 Log.i("ClipSync", "↑ 上传短信: ${text.take(40)}")
-                ws?.send(
-                    type = MessageType.NOTIFY_PC,
-                    payloadText = text,
-                    mime = "text/plain",
-                    preview = preview,
-                    kind = "sms_code"
-                )
+                val wsClient = ws
+                if (wsClient == null) {
+                    // 冷启动：还在换 token，连接实例都没有。暂存，连上后补发，
+                    // 别让验证码消失在半路。（注意 ws 非空时不进来：WsClient.send
+                    // 内部已有离线队列，这里再存一份会导致补发两遍）
+                    synchronized(pendingSms) { pendingSms.add(text to preview) }
+                    Log.i("ClipSync", "⏸ 连接未就绪，短信已暂存等待补发")
+                } else {
+                    wsClient.send(
+                        type = MessageType.NOTIFY_PC,
+                        payloadText = text,
+                        mime = "text/plain",
+                        preview = preview,
+                        kind = "sms_code"
+                    )
+                }
                 // 存短信历史（出）
                 HistoryStore.addSms(
                     this,
@@ -540,10 +652,25 @@ class SyncService : Service() {
         return START_STICKY
     }
 
+    /**
+     * 任务被划掉时回调。
+     *
+     * 用户在最近任务里把 ClipSync 滑掉 → 系统回调这里。区别于 Home 键的
+     * onPause / onStop（后者只是切后台，服务要继续保活）。划掉 = 不用了，
+     * 这里要立即 stopSelf + 把 sync_enabled 置 false，否则下次短信又会拉起服务。
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Log.i("ClipSync", "⛔ 任务被划掉，停止同步服务")
+        setUserEnabled(this, false)
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         Log.i("ClipSync", "⚪ 同步服务已停止")
         // 先立标记：让还在飞的登录请求回来后不要再建连
         destroyed = true
+        serviceAlive = false
         connecting = false
         networkCallback?.let { cb ->
             runCatching {
@@ -559,7 +686,7 @@ class SyncService : Service() {
         ws?.stop()
         ws = null
         currentWs = null
-        wakeLock?.let { if (it.isHeld) it.release() }
+        releaseWakeLock()
         wakeLock = null
         // 保留已有的失败原因（stopWithReason 刚设过），用户主动停止时它是 null
         ConnectionBus.publish(ConnectionBus.STATE_CLOSED, ConnectionBus.failureReason)

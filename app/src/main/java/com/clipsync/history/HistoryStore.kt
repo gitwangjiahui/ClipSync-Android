@@ -36,11 +36,19 @@ object HistoryStore {
     fun listSms(ctx: Context): List<HistoryItem> = read(ctx, KEY_SMS)
     fun listClip(ctx: Context): List<HistoryItem> = read(ctx, KEY_CLIP)
 
-    /** 合并短信 + 剪贴板，按时间倒序 */
+    /**
+     * 合并短信 + 剪贴板，按时间倒序。
+     *
+     * 排序前先把 ts 归一到毫秒：本机记录存的是秒，远端消息沿用 msg.ts 存的是毫秒，
+     * 直接比大小的话毫秒那批会永远排在最前面，和真实先后无关。
+     */
     fun listAll(ctx: Context): List<HistoryItem> {
         val merged = read(ctx, KEY_SMS) + read(ctx, KEY_CLIP)
-        return merged.sortedByDescending { it.ts }
+        return merged.sortedByDescending { millisOf(it.ts) }
     }
+
+    /** 秒级时间戳到 5138 年才会到 13 位，所以 ≥1e12 必然已经是毫秒 */
+    fun millisOf(ts: Long): Long = if (ts >= 1_000_000_000_000L) ts else ts * 1000
 
     fun clearSms(ctx: Context) = write(ctx, KEY_SMS, emptyList())
     fun clearClip(ctx: Context) = write(ctx, KEY_CLIP, emptyList())

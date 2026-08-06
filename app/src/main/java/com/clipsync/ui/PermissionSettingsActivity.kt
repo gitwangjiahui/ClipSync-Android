@@ -1,87 +1,73 @@
 package com.clipsync.ui
 
-import android.Manifest
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.graphics.drawable.GradientDrawable
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.os.PowerManager
 import android.provider.Settings
-import android.text.Spannable
-import android.text.SpannableStringBuilder
-import android.text.style.ForegroundColorSpan
 import android.view.Gravity
 import android.view.View
-import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
 
 /**
- * 权限设置页：所有权限授权入口 + 状态总览。
+ * 权限页：完成度概览 + 逐项引导。
+ *
+ * 旧版是五个饱和色按钮竖排（靛蓝/紫/红/橙/红），看着像报警面板，
+ * 而且看不出哪几项已经好了。现在改成：顶部一条完成度进度，
+ * 下面每项自己报状态——已就绪的收敛成灰勾，未就绪的才给操作按钮。
  */
 class PermissionSettingsActivity : AppCompatActivity() {
 
-    private lateinit var statusText: TextView
+    private lateinit var summaryTitle: TextView
+    private lateinit var summaryDesc: TextView
+    private lateinit var progressFill: View
+    private lateinit var progressTrack: View
+    private lateinit var itemsCard: LinearLayout
+    private lateinit var hintCard: View
 
     private val permissionLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
         val denied = result.filterValues { !it }.keys
         if (denied.isEmpty()) {
-            Toast.makeText(this, "全部权限已授予", Toast.LENGTH_SHORT).show()
+            toast("全部权限已授予", Design.Color.SUCCESS)
         } else {
-            Toast.makeText(this, "未授权: ${denied.joinToString()}", Toast.LENGTH_LONG).show()
+            toast("仍未授权：${denied.size} 项", Design.Color.WARNING)
         }
-        updateStatusText()
+        render()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        title = "权限设置"
+        title = "权限"
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
 
-        val scroll = ScrollView(this)
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 64)
+            setBackgroundColor(Design.Color.CANVAS)
+            val h = Design.dp(this@PermissionSettingsActivity, Design.Space.L)
+            setPadding(h, h, h, Design.dp(this@PermissionSettingsActivity, 32f))
         }
+        container.addView(buildSummaryCard(), matchWrap(Design.Space.M))
+        itemsCard = SettingsRows.group(this, container, "逐项检查")
+        hintCard = buildHintCard()
+        container.addView(hintCard, matchWrap(0f))
 
-        // ====== 单卡片：所有权限 ======
-        val permCard = cardLayout()
-        permCard.addView(sectionTitle("权限授权", 0xFFF59E0B.toInt()))
-        statusText = TextView(this).apply { textSize = 13f }
-        permCard.addView(statusText, marginParams(16))
-
-        permCard.addView(hintText(
-            "小米/红米手机必须开启以下全部权限，否则短信推送无法工作：\n" +
-            "1. 短信 & 通知权限 —— 读取短信内容\n" +
-            "2. 通知使用权 —— 绕开厂商短信广播拦截\n" +
-            "3. 自启动权限（MIUI 关键）—— 让系统允许绑定通知监听服务\n" +
-            "4. 关闭电池优化 / 省电策略设为「无限制」—— 防止后台被冻结"
-        ), marginParams(16))
-
-        permCard.addView(coloredButton("短信 & 通知权限", 0xFF6366F1.toInt()) { requestNeededPermissions() }, marginParams(12))
-        permCard.addView(coloredButton("通知监听（绕开厂商短信拦截）", 0xFF8B5CF6.toInt()) { openNotificationListenerSettings() }, marginParams(12))
-        permCard.addView(coloredButton("自启动管理（MIUI 关键）", 0xFFDC2626.toInt()) { openMiuiAutoStartSettings() }, marginParams(12))
-        permCard.addView(coloredButton("关闭电池优化 / 省电策略", 0xFFF97316.toInt()) { requestIgnoreBatteryOptimization() }, marginParams(12))
-        permCard.addView(coloredButton("重新触发通知监听绑定", 0xFFEF4444.toInt()) { rebindNotificationListener() })
-        container.addView(permCard, cardParams())
-
-        scroll.addView(container)
-        setContentView(scroll)
-        updateStatusText()
+        setContentView(ScrollView(this).apply {
+            setBackgroundColor(Design.Color.CANVAS)
+            addView(container)
+        })
+        render()
     }
 
     override fun onResume() {
         super.onResume()
-        updateStatusText()
+        render()
     }
 
     override fun onSupportNavigateUp(): Boolean {
@@ -89,50 +75,227 @@ class PermissionSettingsActivity : AppCompatActivity() {
         return true
     }
 
-    // MARK: - 权限相关
+    // MARK: - 概览
 
-    private fun neededPermissions(): Array<String> {
-        val list = mutableListOf(
-            Manifest.permission.RECEIVE_SMS,
-            Manifest.permission.READ_SMS
-        )
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            list.add(Manifest.permission.POST_NOTIFICATIONS)
-            list.add(Manifest.permission.READ_MEDIA_IMAGES)
-        } else {
-            @Suppress("DEPRECATION")
-            list.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+    private fun buildSummaryCard(): View {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Design.outlinedBg(
+                this@PermissionSettingsActivity,
+                Design.Color.SURFACE, Design.Color.BORDER_CARD, Design.Radius.CARD
+            )
+            val h = Design.dp(this@PermissionSettingsActivity, 18f)
+            setPadding(h, h, h, h)
         }
-        return list.toTypedArray()
+
+        summaryTitle = Design.text(this, "", Design.Text.TITLE, Design.Color.INK, bold = true)
+        card.addView(summaryTitle)
+
+        summaryDesc = Design.text(this, "", Design.Text.CAPTION, Design.Color.INK_SECONDARY).apply {
+            setLineSpacing(0f, 1.4f)
+            setPadding(0, Design.dp(this@PermissionSettingsActivity, 5f), 0,
+                Design.dp(this@PermissionSettingsActivity, Design.Space.M))
+        }
+        card.addView(summaryDesc)
+
+        // 进度条：轨道固定宽，填充条按比例改 layout 宽度
+        progressTrack = View(this).apply {
+            background = Design.roundedBg(
+                this@PermissionSettingsActivity, Design.Color.NEUTRAL_TINT, 3f
+            )
+        }
+        progressFill = View(this).apply {
+            background = Design.roundedBg(this@PermissionSettingsActivity, Design.Color.PRIMARY, 3f)
+        }
+        val barHeight = Design.dp(this, 6f)
+        val bar = FrameLayout(this).apply {
+            addView(progressTrack, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, barHeight
+            ))
+            addView(progressFill, FrameLayout.LayoutParams(0, barHeight))
+        }
+        card.addView(bar, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, barHeight
+        ))
+        return card
     }
 
-    private fun hasAllPermissions(): Boolean =
-        neededPermissions().all {
-            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+    private fun buildHintCard(): View {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Design.outlinedBg(
+                this@PermissionSettingsActivity,
+                Design.Color.WARNING_TINT_SOFT, Design.Color.WARNING_BORDER, Design.Radius.INPUT
+            )
+            val h = Design.dp(this@PermissionSettingsActivity, 14f)
+            setPadding(h, h, h, h)
+            visibility = View.GONE
+        }
+        card.addView(
+            Design.text(this, "通知监听没连上", Design.Text.CARD_TITLE, Design.Color.WARNING, bold = true)
+        )
+        card.addView(
+            Design.text(
+                this,
+                "开关已打开但服务没被系统绑定，通常是自启动被拦。" +
+                    "先开自启动，再点下面的按钮重新触发绑定。",
+                Design.Text.MICRO, Design.Color.INK_SECONDARY
+            ).apply {
+                setLineSpacing(0f, 1.45f)
+                setPadding(0, Design.dp(this@PermissionSettingsActivity, 5f), 0,
+                    Design.dp(this@PermissionSettingsActivity, Design.Space.M))
+            }
+        )
+        card.addView(actionButton("重新触发绑定") { rebindNotificationListener() })
+        return card
+    }
+
+    /** 描边小按钮，权限项和提示卡共用 */
+    private fun actionButton(label: String, onClick: () -> Unit): TextView =
+        Design.text(this, label, Design.Text.CAPTION, Design.Color.PRIMARY).apply {
+            gravity = Gravity.CENTER
+            background = Design.outlinedBg(
+                this@PermissionSettingsActivity,
+                Design.Color.SURFACE, Design.Color.PRIMARY, Design.Radius.CHIP
+            )
+            val h = Design.dp(this@PermissionSettingsActivity, 14f)
+            val v = Design.dp(this@PermissionSettingsActivity, 8f)
+            setPadding(h, v, h, v)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onClick() }
         }
 
-    private fun requestNeededPermissions() {
-        val missing = neededPermissions().filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }.toTypedArray()
+    private fun matchWrap(bottomDp: Float) = LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+    ).apply { bottomMargin = Design.dp(this@PermissionSettingsActivity, bottomDp) }
+
+    // MARK: - 渲染
+
+    /**
+     * 每次进页面/授权回来都整体重画。
+     * 权限状态可能在系统设置里被改，逐个增量更新反而更容易漏。
+     */
+    private fun render() {
+        val items = PermissionStatus.all(this)
+        val ready = items.count { it.granted }
+
+        summaryTitle.text = if (ready == items.size) "全部就绪" else "$ready / ${items.size} 项已就绪"
+        summaryDesc.text = if (ready == items.size) {
+            "短信推送和后台保活所需的权限都已开启。"
+        } else {
+            "缺任意一项，短信推送就可能收不到。按下面顺序开完即可。"
+        }
+
+        // 填充宽度按轨道实际宽度算，所以要等 layout 完成
+        progressTrack.post {
+            val full = progressTrack.width
+            if (full <= 0) return@post
+            val ratio = ready.toFloat() / items.size
+            progressFill.layoutParams = progressFill.layoutParams.apply {
+                width = (full * ratio).toInt()
+            }
+            progressFill.requestLayout()
+        }
+        (progressFill.background as? android.graphics.drawable.GradientDrawable)?.setColor(
+            if (ready == items.size) Design.Color.SUCCESS else Design.Color.PRIMARY
+        )
+
+        itemsCard.removeAllViews()
+        items.forEachIndexed { index, item ->
+            if (index > 0) SettingsRows.separator(this, itemsCard)
+            itemsCard.addView(buildItemRow(item), LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ))
+        }
+
+        val notifEnabled = PermissionStatus.notificationListenerEnabled(this)
+        val notifLive = PermissionStatus.notificationListenerLive(this)
+        hintCard.visibility = if (notifEnabled && !notifLive) View.VISIBLE else View.GONE
+    }
+
+    /**
+     * 一项权限一行：状态标记 + 标题 + 说明，未就绪的右侧才给操作按钮。
+     * 已就绪的不给按钮，避免用户重复点进系统设置找不到要改什么。
+     */
+    private fun buildItemRow(item: PermissionStatus.Item): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            val v = Design.dp(this@PermissionSettingsActivity, 13f)
+            setPadding(0, v, 0, v)
+        }
+
+        val markSize = Design.dp(this, 18f)
+        val mark = Design.text(
+            this, if (item.granted) "✓" else "!", 10.5f,
+            if (item.granted) Design.Color.SUCCESS else Design.Color.WARNING
+        ).apply {
+            gravity = Gravity.CENTER
+            background = Design.circleBg(
+                if (item.granted) Design.Color.SUCCESS_TINT else Design.Color.WARNING_TINT
+            )
+        }
+        row.addView(mark, LinearLayout.LayoutParams(markSize, markSize).apply {
+            marginEnd = Design.dp(this@PermissionSettingsActivity, Design.Space.M)
+        })
+
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(Design.text(this, item.label, Design.Text.LABEL, Design.Color.INK))
+        col.addView(
+            Design.text(this, item.why, Design.Text.MICRO, Design.Color.INK_MUTED).apply {
+                setLineSpacing(0f, 1.35f)
+                setPadding(0, Design.dp(this@PermissionSettingsActivity, 3f), 0, 0)
+            }
+        )
+        row.addView(col, LinearLayout.LayoutParams(
+            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+        ))
+
+        if (!item.granted) {
+            row.addView(actionButton("开启") { openFor(item.label) },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    marginStart = Design.dp(this@PermissionSettingsActivity, Design.Space.M)
+                })
+        }
+        return row
+    }
+
+    /** 用标题分发，标题来自 PermissionStatus.all 的固定文案 */
+    private fun openFor(label: String) {
+        when (label) {
+            "短信与通知权限" -> requestRuntimePermissions()
+            "通知使用权" -> openNotificationListenerSettings()
+            "通知监听已连接" -> rebindNotificationListener()
+            "电池策略无限制" -> requestIgnoreBatteryOptimization()
+        }
+    }
+
+    // MARK: - 跳转与授权
+
+    private fun requestRuntimePermissions() {
+        val missing = PermissionStatus.missingRuntimePermissions(this)
         if (missing.isEmpty()) {
-            Toast.makeText(this, "权限已全部授予", Toast.LENGTH_SHORT).show()
+            toast("权限已全部授予", Design.Color.SUCCESS)
             return
         }
         permissionLauncher.launch(missing)
     }
 
     private fun requestIgnoreBatteryOptimization() {
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        if (pm.isIgnoringBatteryOptimizations(packageName)) {
-            Toast.makeText(this, "已加入电池白名单", Toast.LENGTH_SHORT).show()
+        if (PermissionStatus.batteryUnrestricted(this)) {
+            toast("已加入电池白名单", Design.Color.SUCCESS)
             return
         }
         try {
-            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
                 data = Uri.parse("package:$packageName")
-            }
-            startActivity(intent)
+            })
         } catch (e: Exception) {
             openAppDetails()
         }
@@ -140,30 +303,29 @@ class PermissionSettingsActivity : AppCompatActivity() {
 
     private fun openAppDetails() {
         try {
-            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                 data = Uri.parse("package:$packageName")
-            }
-            startActivity(intent)
+            })
         } catch (e: Exception) {
-            Toast.makeText(this, "打开设置失败: ${e.message}", Toast.LENGTH_LONG).show()
+            toast("打开设置失败：${e.message}", Design.Color.DANGER)
         }
     }
 
     private fun openNotificationListenerSettings() {
         try {
             startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-            Toast.makeText(this, "在列表中找到 ClipSync 并打开开关", Toast.LENGTH_LONG).show()
+            toast("在列表中找到 ClipSync 并打开开关", Design.Color.NEUTRAL)
         } catch (e: Exception) {
-            Toast.makeText(this, "打开设置失败: ${e.message}", Toast.LENGTH_LONG).show()
+            toast("打开设置失败：${e.message}", Design.Color.DANGER)
         }
     }
 
     /**
-     * 跳转 MIUI/HyperOS 自启动管理页面。
-     * 不同 MIUI 版本的 Activity 名略有差异，按优先级尝试，全部失败则打开安全中心首页。
+     * 跳 MIUI/HyperOS 自启动管理。各版本 Activity 名不同，按优先级试，
+     * 都不行就退到安全中心首页。
      *
-     * 这是短信推送不工作的最常见根因：MIUI 的 AutoStartManagerService 会拦截
-     * NotificationListenerService 的绑定，导致 onListenerConnected 永远不会被调用。
+     * 这是短信推送不工作最常见的根因：MIUI 的 AutoStartManagerService 会拦截
+     * NotificationListenerService 的绑定，onListenerConnected 永远不会被调用。
      */
     private fun openMiuiAutoStartSettings() {
         val candidates = listOf(
@@ -182,179 +344,45 @@ class PermissionSettingsActivity : AppCompatActivity() {
                 intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 if (packageManager.resolveActivity(intent, 0) != null) {
                     startActivity(intent)
-                    Toast.makeText(this,
-                        "请在列表中找到 ClipSync 并打开自启动开关",
-                        Toast.LENGTH_LONG).show()
+                    toast("在列表中找到 ClipSync 并打开自启动开关", Design.Color.NEUTRAL)
                     return
                 }
-            } catch (_: Exception) { /* 尝试下一个 */ }
+            } catch (_: Exception) { /* 试下一个 */ }
         }
-        // 兜底：打开安全中心首页
         try {
-            val fallback = Intent().setClassName("com.miui.securitycenter",
-                "com.miui.permcenter.activity.MainActivity")
-            fallback.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            startActivity(fallback)
-            Toast.makeText(this,
-                "请在安全中心 → 应用管理 → 自启动管理中开启 ClipSync",
-                Toast.LENGTH_LONG).show()
+            startActivity(Intent().setClassName("com.miui.securitycenter",
+                "com.miui.permcenter.activity.MainActivity").apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            })
+            toast("安全中心 → 应用管理 → 自启动管理中开启 ClipSync", Design.Color.NEUTRAL)
         } catch (e: Exception) {
-            Toast.makeText(this,
-                "无法打开 MIUI 自启动管理，请手动进入：设置 → 应用设置 → 应用管理 → ClipSync → 自启动",
-                Toast.LENGTH_LONG).show()
+            toast("请手动进入：设置 → 应用管理 → ClipSync → 自启动", Design.Color.NEUTRAL)
         }
     }
 
     /**
-     * 重新触发系统对 NotificationListenerService 的绑定。
-     *
-     * 场景：用户刚开了自启动权限，但系统不会主动重新绑定 listener，
-     * 需要调用 requestRebind 主动触发一次绑定请求。
-     * 也可以让用户在通知使用权页面「关掉再打开」开关达到同样效果。
+     * 主动请系统重新绑定 NotificationListenerService。
+     * 刚开完自启动时系统不会自己重连，需要触发一次；
+     * 手动「关掉再打开」通知使用权开关也是同样效果。
      */
     private fun rebindNotificationListener() {
-        val cn = android.content.ComponentName(this, com.clipsync.sms.NotificationSmsListener::class.java)
+        val cn = ComponentName(this, com.clipsync.sms.NotificationSmsListener::class.java)
         try {
-            // 反射调用 requestRebind（API 25+，部分系统对第三方隐藏）
-            val service = getSystemService("notification")
-            val method = service.javaClass.getMethod("requestRebind", android.content.ComponentName::class.java)
+            // requestRebind 在 API 25+ 存在，但部分系统对第三方隐藏，只能反射
+            val service = getSystemService(Context.NOTIFICATION_SERVICE)
+            val method = service.javaClass.getMethod("requestRebind", ComponentName::class.java)
             method.invoke(service, cn)
-            Toast.makeText(this,
-                "已请求重新绑定通知监听，请等待几秒后查看状态",
-                Toast.LENGTH_LONG).show()
+            toast("已请求重新绑定，几秒后回来看状态", Design.Color.NEUTRAL)
         } catch (e: Exception) {
-            // 兜底：引导用户手动操作
             openNotificationListenerSettings()
-            Toast.makeText(this,
-                "请把 ClipSync 的通知使用权开关「关掉再打开」以触发绑定",
-                Toast.LENGTH_LONG).show()
+            toast("请把 ClipSync 的通知使用权开关关掉再打开", Design.Color.NEUTRAL)
         }
     }
 
-    private fun isNotificationListenerEnabled(): Boolean {
-        val flat = Settings.Secure.getString(contentResolver, "enabled_notification_listeners") ?: return false
-        return flat.split(":").any { it.contains(packageName) }
+    /** 懒初始化：内容根要等 setContentView 之后才存在 */
+    private val topToast by lazy { DesignToast.attach(this) }
+
+    private fun toast(msg: String, tone: Int = Design.Color.PRIMARY) {
+        topToast.show(msg, tone)
     }
-
-    /**
-     * 检查 NotificationListenerService 是否已被系统实际绑定（处于 Live 状态）。
-     * 仅 enabled=true 还不够，MIUI 可能拦截绑定请求，需确认 listener 真的连上。
-     */
-    private fun isNotificationListenerLive(): Boolean {
-        return try {
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE)
-            // NotificationManager.getActiveNotificationListeners()（API 25+）
-            val method = nm.javaClass.getMethod("getActiveNotificationListeners")
-            @Suppress("UNCHECKED_CAST")
-            val list = method.invoke(nm) as? List<android.content.ComponentName>
-            list?.any { it.packageName == packageName } == true
-        } catch (e: Exception) {
-            // 退回到 enabled 标志位检查
-            isNotificationListenerEnabled()
-        }
-    }
-
-    private fun updateStatusText() {
-        val smsOk = hasAllPermissions()
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        val batteryOk = pm.isIgnoringBatteryOptimizations(packageName)
-        val notifEnabled = isNotificationListenerEnabled()
-        val notifLive = isNotificationListenerLive()
-        // MIUI 自启动权限无法通过 API 直接查询，根据 listener 是否实际连上来反推
-        val autoStartOk = notifLive
-
-        val ssb = SpannableStringBuilder()
-        listOf(
-            "短信 & 通知权限" to smsOk,
-            "通知使用权" to notifEnabled,
-            "通知监听已连接" to notifLive,
-            "自启动（MIUI）" to autoStartOk,
-            "电池白名单" to batteryOk
-        ).forEachIndexed { i, (label, isOk) ->
-            if (i > 0) ssb.append("\n")
-            val dot = if (isOk) "●" else "○"
-            val color = if (isOk) 0xFF22C55E.toInt() else 0xFFEF4444.toInt()
-            val tag = if (isOk) "已开启" else "未开启"
-            val start = ssb.length
-            ssb.append("$dot $label · $tag")
-            ssb.setSpan(
-                ForegroundColorSpan(color),
-                start, start + 1,
-                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
-            )
-        }
-        // 若通知监听授权了但没连上，额外提示
-        if (notifEnabled && !notifLive) {
-            ssb.append("\n⚠ 通知监听授权但未连上，多半是自启动被拦，请点「自启动管理」开启后再点「重新触发通知监听绑定」")
-        }
-        statusText.text = ssb
-    }
-
-    // MARK: - UI 辅助
-
-    private fun cardLayout(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        background = roundedBg(0xFFFFFFFF.toInt(), 20f)
-        setPadding(32, 32, 32, 40)
-        elevation = 4f
-    }
-
-    private fun cardParams() = LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.MATCH_PARENT,
-        LinearLayout.LayoutParams.WRAP_CONTENT
-    ).apply { bottomMargin = 32 }
-
-    private fun marginParams(bottom: Int = 0) = LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.MATCH_PARENT,
-        LinearLayout.LayoutParams.WRAP_CONTENT
-    ).apply { bottomMargin = bottom }
-
-    private fun sectionTitle(text: String, color: Int): View {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, 20)
-        }
-        val bar = View(this).apply {
-            background = roundedBg(color, 4f)
-            layoutParams = LinearLayout.LayoutParams(12, 48)
-        }
-        val title = TextView(this).apply {
-            this.text = text
-            textSize = 17f
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            setTextColor(0xFF1F2937.toInt())
-            setPadding(16, 0, 0, 0)
-        }
-        row.addView(bar)
-        row.addView(title)
-        return row
-    }
-
-    private fun hintText(text: String): TextView = TextView(this).apply {
-        this.text = text
-        textSize = 12f
-        setTextColor(0xFF6B7280.toInt())
-        setLineSpacing(0f, 1.4f)
-        background = roundedBg(0xFFF3F4F6.toInt(), 12f)
-        setPadding(24, 20, 24, 20)
-    }
-
-    private fun coloredButton(text: String, bgColor: Int, onClick: () -> Unit): Button {
-        return Button(this).apply {
-            this.text = text
-            setTextColor(0xFFFFFFFF.toInt())
-            background = roundedBg(bgColor, 16f)
-            setPadding(0, 32, 0, 32)
-            textSize = 14f
-            setOnClickListener { onClick() }
-        }
-    }
-
-    private fun roundedBg(color: Int, radius: Float): GradientDrawable =
-        GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = radius
-            setColor(color)
-        }
 }

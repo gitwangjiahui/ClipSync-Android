@@ -2,131 +2,174 @@ package com.clipsync.ui
 
 import android.os.Bundle
 import android.text.format.DateUtils
+import android.view.Gravity
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
-import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import com.clipsync.clipboard.ClipboardImageStore
 import com.clipsync.history.HistoryStore
 
 /**
- * 历史记录页。顶部筛选：全部 / 短信 / 剪贴板。
+ * 历史记录页：顶部 chip 筛选 + 卡片式列表。
+ *
+ * 旧版三个筛选按钮是等宽实心蓝块，视觉重量压过了内容本身；
+ * 现在改成 chip：选中态用深墨色实心，未选是白底描边，
+ * 让注意力回到记录内容上。
  */
 class HistoryActivity : AppCompatActivity() {
 
     private var filter: String = FILTER_ALL
-    private lateinit var filterBar: LinearLayout
-    private lateinit var btnAll: Button
-    private lateinit var btnSms: Button
-    private lateinit var btnClip: Button
+    private val chips = mutableMapOf<String, TextView>()
     private lateinit var listView: ListView
-    private lateinit var emptyText: TextView
+    private lateinit var emptyView: View
+    private lateinit var countText: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         title = "历史记录"
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
 
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-
-        // 筛选栏
-        filterBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(24, 16, 24, 8)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Design.Color.CANVAS)
         }
-        btnAll = filterButton("全部") { setFilter(FILTER_ALL) }
-        btnSms = filterButton("短信") { setFilter(FILTER_SMS) }
-        btnClip = filterButton("剪贴板") { setFilter(FILTER_CLIP) }
-        filterBar.addView(btnAll, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        filterBar.addView(btnSms, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        filterBar.addView(btnClip, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(filterBar)
+        root.addView(buildFilterBar(), LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
 
-        emptyText = TextView(this).apply {
-            text = "暂无记录"
-            setPadding(48, 96, 48, 48)
-            textSize = 16f
-            visibility = View.GONE
+        // 列表和空态叠在同一块区域，切换时只改可见性
+        val stack = FrameLayout(this)
+        listView = ListView(this).apply {
+            divider = null
+            dividerHeight = 0
+            // 列表自己不画选中底色：行卡片已经是白底，系统高亮会显得脏
+            setSelector(android.R.color.transparent)
+            clipToPadding = false
+            val h = Design.dp(this@HistoryActivity, Design.Space.L)
+            setPadding(h, 0, h, Design.dp(this@HistoryActivity, 24f))
         }
-        listView = ListView(this)
-        root.addView(emptyText)
-        root.addView(listView)
+        emptyView = buildEmptyView()
+        stack.addView(listView, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+        stack.addView(emptyView, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.CENTER_HORIZONTAL })
+        root.addView(stack, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+        ))
+
         setContentView(root)
-
-        updateFilterStyles()
-        refresh()
+        applyFilter(FILTER_ALL)
 
         listView.setOnItemClickListener { _, _, position, _ ->
-            val item = (listView.adapter as HistoryAdapter).getItem(position)
-            val clipboard = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
-            if (item.kind == "image" && item.imageName.isNotEmpty()) {
-                val ok = com.clipsync.clipboard.ClipboardImageStore
-                    .writeToClipboard(this, item.imageName)
-                Toast.makeText(
-                    this,
-                    if (ok) "图片已复制到剪贴板" else "图片文件已丢失，无法复制",
-                    Toast.LENGTH_SHORT
-                ).show()
-                return@setOnItemClickListener
-            }
-            clipboard.setPrimaryClip(
-                android.content.ClipData.newPlainText("ClipSync", item.text)
-            )
-            Toast.makeText(this, "已复制到剪贴板", Toast.LENGTH_SHORT).show()
+            copyItem((listView.adapter as HistoryAdapter).getItem(position))
         }
     }
 
-    private fun setFilter(f: String) {
-        filter = f
-        updateFilterStyles()
+    override fun onSupportNavigateUp(): Boolean {
+        finish()
+        return true
+    }
+
+    // MARK: - 筛选栏
+
+    private fun buildFilterBar(): View {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Design.Color.CANVAS)
+            val h = Design.dp(this@HistoryActivity, Design.Space.L)
+            setPadding(h, Design.dp(this@HistoryActivity, Design.Space.M), h, h)
+        }
+        listOf(
+            FILTER_ALL to "全部",
+            FILTER_SMS to "短信",
+            FILTER_CLIP to "剪贴板"
+        ).forEachIndexed { index, (key, label) ->
+            val chip = buildChip(label) { applyFilter(key) }
+            chips[key] = chip
+            bar.addView(chip, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                if (index > 0) marginStart = Design.dp(this@HistoryActivity, Design.Space.S)
+            })
+        }
+
+        // 条数放在筛选栏右端：它是筛选结果的注脚，不值得单独占一行
+        countText = Design.text(this, "", Design.Text.MICRO, Design.Color.INK_MUTED).apply {
+            gravity = Gravity.END
+        }
+        bar.addView(countText, LinearLayout.LayoutParams(
+            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+        ).apply { marginStart = Design.dp(this@HistoryActivity, Design.Space.S) })
+        return bar
+    }
+
+    private fun buildChip(label: String, onClick: () -> Unit): TextView =
+        Design.text(this, label, Design.Text.CAPTION, Design.Color.INK_SECONDARY).apply {
+            val h = Design.dp(this@HistoryActivity, 14f)
+            val v = Design.dp(this@HistoryActivity, 7f)
+            setPadding(h, v, h, v)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onClick() }
+        }
+
+    private fun applyFilter(key: String) {
+        filter = key
+        chips.forEach { (chipKey, chip) ->
+            val active = chipKey == key
+            chip.setTextColor(if (active) Design.Color.SURFACE else Design.Color.INK_SECONDARY)
+            chip.background = if (active) {
+                Design.roundedBg(this, Design.Color.INK, Design.Radius.CHIP)
+            } else {
+                Design.outlinedBg(
+                    this, Design.Color.SURFACE, Design.Color.BORDER, Design.Radius.CHIP
+                )
+            }
+        }
         refresh()
     }
 
-    private fun updateFilterStyles() {
-        val active = 0xFF3B82F6.toInt()   // 蓝色
-        val inactive = 0xFFE5E7EB.toInt() // 浅灰
-        val activeText = 0xFFFFFFFF.toInt()
-        val inactiveText = 0xFF6B7280.toInt()
-        listOf(btnAll to (filter == FILTER_ALL),
-               btnSms to (filter == FILTER_SMS),
-               btnClip to (filter == FILTER_CLIP)).forEach { (btn, isActive) ->
-            btn.setBackgroundColor(if (isActive) active else inactive)
-            btn.setTextColor(if (isActive) activeText else inactiveText)
+    private fun buildEmptyView(): View {
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            visibility = View.GONE
+            setPadding(0, Design.dp(this@HistoryActivity, 72f), 0, 0)
         }
-    }
-
-    private fun filterButton(text: String, onClick: () -> Unit): Button = Button(this).apply {
-        this.text = text
-        setOnClickListener { onClick() }
-    }
-
-    override fun onCreateOptionsMenu(menu: Menu?): Boolean {
-        menu?.add(0, 1, 0, "清空")
-        return super.onCreateOptionsMenu(menu)
-    }
-
-    override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        return when (item.itemId) {
-            1 -> {
-                when (filter) {
-                    FILTER_SMS -> HistoryStore.clearSms(this)
-                    FILTER_CLIP -> HistoryStore.clearClip(this)
-                    else -> HistoryStore.clearAll(this)
-                }
-                refresh()
-                Toast.makeText(this, "已清空", Toast.LENGTH_SHORT).show()
-                true
+        col.addView(View(this).apply {
+            background = Design.circleBg(Design.Color.NEUTRAL_TINT)
+        }, LinearLayout.LayoutParams(
+            Design.dp(this, 44f), Design.dp(this, 44f)
+        ))
+        col.addView(
+            Design.text(this, "暂无记录", Design.Text.CARD_TITLE, Design.Color.INK_SECONDARY).apply {
+                setPadding(0, Design.dp(this@HistoryActivity, Design.Space.L), 0, 0)
             }
-            android.R.id.home -> { finish(); true }
-            else -> super.onOptionsItemSelected(item)
-        }
+        )
+        col.addView(
+            Design.text(this, "同步过的短信和剪贴板会出现在这里", Design.Text.MICRO, Design.Color.INK_MUTED).apply {
+                setPadding(0, Design.dp(this@HistoryActivity, 6f), 0, 0)
+            }
+        )
+        return col
     }
+
+    // MARK: - 数据
 
     private fun refresh() {
         val list = when (filter) {
@@ -135,8 +178,81 @@ class HistoryActivity : AppCompatActivity() {
             else -> HistoryStore.listAll(this)
         }
         listView.adapter = HistoryAdapter(list)
-        emptyText.visibility = if (list.isEmpty()) View.VISIBLE else View.GONE
+        emptyView.visibility = if (list.isEmpty()) View.VISIBLE else View.GONE
+        countText.text = if (list.isEmpty()) "" else "${list.size} 条"
     }
+
+    private fun copyItem(item: HistoryStore.HistoryItem) {
+        val clipboard = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        if (item.kind == "image" && item.imageName.isNotEmpty()) {
+            val ok = ClipboardImageStore.writeToClipboard(this, item.imageName)
+            toast(
+                if (ok) "图片已复制到剪贴板" else "图片文件已丢失，无法复制",
+                if (ok) Design.Color.SUCCESS else Design.Color.DANGER
+            )
+            return
+        }
+        clipboard.setPrimaryClip(
+            android.content.ClipData.newPlainText("ClipSync", item.text)
+        )
+        toast("已复制到剪贴板", Design.Color.SUCCESS)
+    }
+
+    /** 懒初始化：内容根要等 setContentView 之后才存在 */
+    private val topToast by lazy { DesignToast.attach(this) }
+
+    private fun toast(msg: String, tone: Int = Design.Color.PRIMARY) {
+        topToast.show(msg, tone)
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu?): Boolean {
+        menu?.add(0, MENU_CLEAR, 0, "清空")?.setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
+        return super.onCreateOptionsMenu(menu)
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean = when (item.itemId) {
+        MENU_CLEAR -> {
+            confirmClear()
+            true
+        }
+        android.R.id.home -> {
+            finish()
+            true
+        }
+        else -> super.onOptionsItemSelected(item)
+    }
+
+    /** 清空不可撤销，加一道确认；只清当前筛选的那一类 */
+    private fun confirmClear() {
+        val scopeLabel = when (filter) {
+            FILTER_SMS -> "短信记录"
+            FILTER_CLIP -> "剪贴板记录"
+            else -> "全部记录"
+        }
+        DesignDialog.show(
+            this, "清空$scopeLabel", "清空后无法恢复。",
+            confirmLabel = "清空", destructive = true
+        ) {
+            when (filter) {
+                FILTER_SMS -> HistoryStore.clearSms(this)
+                FILTER_CLIP -> HistoryStore.clearClip(this)
+                else -> HistoryStore.clearAll(this)
+            }
+            refresh()
+            toast("已清空", Design.Color.SUCCESS)
+        }
+    }
+
+    // MARK: - 列表行
+
+    /** 行内视图引用，避免每次 getView 都 findViewById */
+    private class RowHolder(
+        val dot: View,
+        val meta: TextView,
+        val time: TextView,
+        val body: TextView,
+        val image: ImageView
+    )
 
     private inner class HistoryAdapter(
         private val items: List<HistoryStore.HistoryItem>
@@ -146,52 +262,124 @@ class HistoryActivity : AppCompatActivity() {
         override fun getItemId(position: Int): Long = position.toLong()
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
-            val row = (convertView as? LinearLayout) ?: LinearLayout(this@HistoryActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(36, 24, 36, 24)
-                addView(android.widget.ImageView(context).apply {
-                    id = 1003
-                    scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
-                    adjustViewBounds = true
-                    visibility = View.GONE
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    ).apply { bottomMargin = 16 }
-                })
-                addView(TextView(context).apply { id = 1001; textSize = 15f; setTextColor(0xFF111111.toInt()) })
-                addView(TextView(context).apply { id = 1002; textSize = 12f; setTextColor(0xFF888888.toInt()) })
-            }
-            val item = items[position]
-            val image = row.findViewById<android.widget.ImageView>(1003)
-            val bmp = if (item.kind == "image" && item.imageName.isNotEmpty()) {
-                com.clipsync.clipboard.ClipboardImageStore.loadBitmap(this@HistoryActivity, item.imageName)
-            } else null
-            if (bmp != null) {
-                image.setImageBitmap(bmp)
-                image.visibility = View.VISIBLE
-            } else {
-                image.setImageBitmap(null)
-                image.visibility = View.GONE
-            }
-            val text = when {
-                item.kind == "image" -> if (bmp != null) "图片（点击复制）" else (item.preview.ifEmpty { "[图片]" } + "（点击复制）")
-                else -> item.text
-            }
-            (row.findViewById<TextView>(1001)).text = text
-            val dirLabel = if (item.direction == "in") "收到" else "发出"
-            val time = DateUtils.getRelativeTimeSpanString(
-                item.ts * 1000, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS
-            )
-            val typeLabel = if (item.kind == "sms" || item.kind == "sms_code") "短信" else "剪贴板"
-            (row.findViewById<TextView>(1002)).text = "$typeLabel · $dirLabel · $time"
+            val row = convertView ?: buildRow()
+            bind(row.tag as RowHolder, items[position])
             return row
         }
+    }
+
+    private fun buildRow(): View {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Design.outlinedBg(
+                this@HistoryActivity, Design.Color.SURFACE, Design.Color.BORDER_CARD, 14f
+            )
+            val h = Design.dp(this@HistoryActivity, 14f)
+            val v = Design.dp(this@HistoryActivity, Design.Space.M)
+            setPadding(h, v, h, v)
+        }
+
+        // 元信息行：色点 + 类型/方向 + 右侧相对时间
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val dot = View(this)
+        header.addView(dot, LinearLayout.LayoutParams(
+            Design.dp(this, 6f), Design.dp(this, 6f)
+        ))
+        val meta = Design.text(this, "", Design.Text.MICRO, Design.Color.INK_SECONDARY).apply {
+            setPadding(Design.dp(this@HistoryActivity, 7f), 0, 0, 0)
+        }
+        header.addView(meta, LinearLayout.LayoutParams(
+            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+        ))
+        val time = Design.text(this, "", Design.Text.MICRO, Design.Color.INK_MUTED).apply {
+            gravity = Gravity.END
+        }
+        header.addView(time)
+        card.addView(header, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
+
+        val body = Design.text(this, "", Design.Text.BODY, Design.Color.INK).apply {
+            maxLines = 3
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setLineSpacing(0f, 1.35f)
+            setPadding(0, Design.dp(this@HistoryActivity, 7f), 0, 0)
+        }
+        card.addView(body, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
+
+        // 缩略图高度固定：图片尺寸各异，按原比例展开会让滚动时行高乱跳
+        val image = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            visibility = View.GONE
+            background = Design.roundedBg(this@HistoryActivity, Design.Color.SUBTLE, 10f)
+            clipToOutline = true
+        }
+        card.addView(image, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            Design.dp(this, 120f)
+        ).apply { topMargin = Design.dp(this@HistoryActivity, Design.Space.S) })
+
+        // ListView 的行不吃 margin，套一层容器撑出行间距
+        return FrameLayout(this).apply {
+            setPadding(0, 0, 0, Design.dp(this@HistoryActivity, 10f))
+            addView(card, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ))
+            tag = RowHolder(dot, meta, time, body, image)
+        }
+    }
+
+    private fun bind(holder: RowHolder, item: HistoryStore.HistoryItem) {
+        val isSms = item.kind == "sms" || item.kind == "sms_code"
+
+        holder.dot.background = Design.circleBg(
+            if (isSms) Design.Color.WARNING else Design.Color.PRIMARY
+        )
+        holder.meta.text = buildString {
+            append(if (isSms) "短信" else "剪贴板")
+            append(" · ")
+            append(if (item.direction == "in") "收到" else "发出")
+        }
+        holder.time.text = DateUtils.getRelativeTimeSpanString(
+            HistoryStore.millisOf(item.ts), System.currentTimeMillis(),
+            DateUtils.MINUTE_IN_MILLIS
+        )
+
+        val bitmap = if (item.kind == "image" && item.imageName.isNotEmpty()) {
+            ClipboardImageStore.loadBitmap(this, item.imageName)
+        } else {
+            null
+        }
+        if (bitmap != null) {
+            holder.image.setImageBitmap(bitmap)
+            holder.image.visibility = View.VISIBLE
+        } else {
+            holder.image.setImageBitmap(null)
+            holder.image.visibility = View.GONE
+        }
+
+        holder.body.text = when {
+            item.kind == "image" && bitmap != null -> "图片 · 点击复制"
+            item.kind == "image" -> item.preview.ifEmpty { "图片已失效" }
+            else -> item.text
+        }
+        holder.body.setTextColor(
+            if (item.kind == "image") Design.Color.INK_SECONDARY else Design.Color.INK
+        )
     }
 
     companion object {
         private const val FILTER_ALL = "all"
         private const val FILTER_SMS = "sms"
         private const val FILTER_CLIP = "clip"
+        private const val MENU_CLEAR = 1
     }
 }

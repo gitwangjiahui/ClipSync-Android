@@ -8,46 +8,56 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
-import android.view.Menu
-import android.view.MenuItem
 import android.view.View
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
-import android.util.Log
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.clipsync.clipboard.ClipboardManagerHelper
 import com.clipsync.service.SyncService
 import com.clipsync.state.ConnectionBus
+import com.clipsync.ui.Design
 import com.clipsync.ui.HistoryActivity
 import com.clipsync.ui.SettingsActivity
 
 /**
- * 主界面（重设计样式）
- * - 顶部：大号状态卡（图标 + 状态文字 + 服务器地址 + 启动/停止按钮）
- * - 中间：剪贴板预览 + 手动推送（保留原"当前剪贴板"功能）
- * - 底部：历史按钮
- * - 右上角齿轮 → 设置（恢复原入口）
+ * 主界面。
+ *
+ * 布局要点（这版重设计的核心）：
+ * - 状态卡用居中同心光环 + 大字状态，服务器地址降级为脚注行
+ * - 剪贴板预览区**固定 96dp**，内容再长也不撑开，底部渐隐提示被截断
+ * - 操作区是**悬浮层**：压在内容之上贴屏幕底，与内容高度完全解耦，
+ *   所以推送按钮的位置永远不会因为剪贴板内容变化而移动
  */
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var statusDot: TextView
+    // 状态光环：三层同心圆，外圈最浅、内核实心
+    private lateinit var ringOuter: FrameLayout
+    private lateinit var ringMid: FrameLayout
+    private lateinit var ringCore: View
     private lateinit var statusText: TextView
     private lateinit var statusHint: TextView
-    private lateinit var statusBadge: LinearLayout
     private lateinit var toggleBtn: Button
     private lateinit var targetText: TextView
+
+    // 剪贴板预览
     private lateinit var clipPreviewText: TextView
     private lateinit var clipPreviewImage: ImageView
+    private lateinit var clipContentFrame: FrameLayout
     private lateinit var clipCard: LinearLayout
+    private lateinit var clipTypeTag: TextView
+    private lateinit var clipFootnote: TextView
     private lateinit var pushBtn: Button
 
     private var dotAnimator: ObjectAnimator? = null
     private var lastWasConnecting = false
+
+    /** 顶部轻提示，替代会挡住底部按钮的系统 Toast */
+    private lateinit var toast: com.clipsync.ui.DesignToast
 
     private val stateListener: (String) -> Unit = { state -> renderState(state) }
     private val previewListener: () -> Unit = { refreshClipPreview() }
@@ -68,45 +78,182 @@ class MainActivity : AppCompatActivity() {
         ClipboardManagerHelper.init(applicationContext, null)
         requestMediaPermissionIfNeeded()
 
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(24, 32, 24, 24)
-            setBackgroundColor(0xFFF6F7FB.toInt())
+        setContentView(buildRoot())
+    }
+
+    /**
+     * 根布局是 FrameLayout 叠两层：
+     *  1. 可滚动内容（状态卡 + 剪贴板卡）
+     *  2. 悬浮操作层（贴底，压在内容之上）
+     *
+     * 用叠层而不是竖排 LinearLayout，是为了让按钮脱离内容流——
+     * 这样剪贴板内容多长都不会把按钮推走。
+     */
+    private fun buildRoot(): View {
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(Design.Color.CANVAS)
         }
 
-        root.addView(buildStatusCard(), LinearLayout.LayoutParams(
+        val actionBar = buildActionBar()
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(
+                Design.dp(this@MainActivity, Design.Space.L),
+                Design.dp(this@MainActivity, Design.Space.L),
+                Design.dp(this@MainActivity, Design.Space.L),
+                // 初值只是占位，真实高度在下面按 actionBar 实测值回填
+                Design.dp(this@MainActivity, 130f)
+            )
+        }
+        content.addView(buildStatusCard(), LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
+        content.addView(buildClipCard(), LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = Design.dp(this@MainActivity, Design.Space.M) })
+
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            // 悬浮层是半透明的，滚动条压在上面会很脏
+            isVerticalScrollBarEnabled = false
+            clipToPadding = false
+            addView(content)
+        }
+
+        root.addView(scroll, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+        root.addView(actionBar, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM
+        ))
+
+        // 挂到窗口顶层而不是这里的 root，横幅才能盖在悬浮操作层之上。
+        // 落点见下方 clearance：紧贴推送按钮上沿。
+        toast = com.clipsync.ui.DesignToast.attach(this)
+
+        // 悬浮层盖住内容底部，内容区要留出等高的安全距，否则最后一张卡看不全。
+        // 高度用实测值而不是写死：系统字体放大后按钮会变高，写死就会压住内容。
+        actionBar.addOnLayoutChangeListener { _, _, top, _, bottom, _, _, _, _ ->
+            val barHeight = bottom - top
+            // 提示浮在按钮正上方，用同一个实测高度让开
+            toast.clearance = barHeight
+            val safeBottom = barHeight + Design.dp(this, Design.Space.M)
+            if (content.paddingBottom != safeBottom) {
+                content.setPadding(
+                    content.paddingLeft, content.paddingTop,
+                    content.paddingRight, safeBottom
+                )
+            }
+        }
+        return root
+    }
+
+    /**
+     * 悬浮操作层：贴屏幕底，压在内容之上。
+     *
+     * 半透明白底 + 上方投影，滚动时内容从它下面穿过，能看出层次。
+     * 关键是它不在内容流里，所以剪贴板内容变化影响不到按钮位置。
+     */
+    private fun buildActionBar(): View {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(
+                Design.dp(this@MainActivity, Design.Space.L),
+                Design.dp(this@MainActivity, Design.Space.M),
+                Design.dp(this@MainActivity, Design.Space.L),
+                Design.dp(this@MainActivity, Design.Space.L)
+            )
+            // 0xEB ≈ 92% 不透明，留一点内容透出来强化悬浮感
+            setBackgroundColor(0xEBFFFFFF.toInt())
+            elevation = Design.dp(this@MainActivity, 12f).toFloat()
+        }
+
+        pushBtn = Button(this).apply {
+            text = "推送到电脑"
+            setTextColor(Design.Color.SURFACE)
+            background = Design.roundedBg(
+                this@MainActivity, Design.Color.PRIMARY, Design.Radius.BUTTON
+            )
+            textSize = 15f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            // stateListAnimator 会盖掉自定义背景的圆角，必须清掉
+            stateListAnimator = null
+            val v = Design.dp(this@MainActivity, 14f)
+            setPadding(0, v, 0, v)
+            setOnClickListener { pushClipboard() }
+        }
+        bar.addView(pushBtn, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         ))
 
-        // "立即推送"按钮放在状态卡下面，剪贴板预览之上
-        pushBtn = styledButton("推送剪切板", 0xFF6366F1.toInt(), 0xFFFFFFFF.toInt()) { pushClipboard() }
-        root.addView(pushBtn, LinearLayout.LayoutParams(
+        // 次要入口：历史 / 设置，描边式，不与主按钮争视觉
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val gap = Design.dp(this, 9f)
+        row.addView(
+            secondaryButton("历史记录") {
+                startActivity(Intent(this, HistoryActivity::class.java))
+            },
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        row.addView(
+            secondaryButton("设置") {
+                startActivity(Intent(this, SettingsActivity::class.java))
+            },
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { leftMargin = gap }
+        )
+        bar.addView(row, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = 16 })
+        ).apply { topMargin = gap })
 
-        // 剪贴板预览卡（自由高度，内容自适应）
-        root.addView(buildClipCard(), LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = 16 })
-
-        setContentView(root)
+        return bar
     }
+
+    private fun secondaryButton(label: String, onClick: () -> Unit): Button =
+        Button(this).apply {
+            text = label
+            setTextColor(Design.Color.INK_SECONDARY)
+            background = Design.outlinedBg(
+                this@MainActivity,
+                Design.Color.SURFACE,
+                Design.Color.BORDER,
+                Design.Radius.CHIP
+            )
+            textSize = Design.Text.CAPTION
+            setTypeface(typeface, android.graphics.Typeface.NORMAL)
+            stateListAnimator = null
+            val v = Design.dp(this@MainActivity, 10f)
+            setPadding(0, v, 0, v)
+            setOnClickListener { onClick() }
+        }
 
     override fun onResume() {
         super.onResume()
         ConnectionBus.addListener(stateListener)
         renderTarget()
         com.clipsync.clipboard.ClipboardManagerHelper.onForeground()
-        // 服务没连上（被杀过，或上次连接时没网）就重新发起；已连上则 kick 加速重连。
-        // 注意 activeWs()==null 也包含"服务活着但换 token 时失败"这种情况，
-        // startSync() 带 ACTION_CONNECT 能让服务重试，不会空转。
-        if (SyncService.activeWs() == null) {
-            startSync()
-        } else {
+        // 不要在回前台时偷偷拉起服务：用户没点过「启动」就让它空着。
+        // 仅在服务还活着时踢一脚加速重连。SyncService 自己是前台服务 + START_STICKY，
+        // 切后台不会被杀、断了也会自己指数退避重连，所以无需 App 介入。
+        if (SyncService.isServiceAlive()) {
             SyncService.kick()
+        } else {
+            // 服务没起：用户划进程 / 主动停止后回到这里。把 sync_enabled 清掉，
+            // 否则一条短信又会把服务拉起来。点「启动同步」时再写回 true。
+            // 注意：判断依据必须是"服务实例是否存活"，而不是 activeWs()——
+            // 刚点启动时服务正在换 token，activeWs() 还是 null，若在这里清标记，
+            // 连接建好后短信同步就被永久关掉了（只能再手动点一次启动）。
+            SyncService.setUserEnabled(this, false)
         }
         ClipboardManagerHelper.addPreviewListener(previewListener)
         // 第一次预览（窗口未获焦点，可能读不到内容，下面 onWindowFocusChanged 会再读）
@@ -132,120 +279,149 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         ClipboardManagerHelper.removePreviewListener(previewListener)
-        ConnectionBus.removeListener(stateListener)
+        // 注意：不在 onPause 里 removeListener。
+        // startForegroundService 在 MIUI 上可能触发短暂的 onPause → onResume，
+        // 如果在这里移除 listener，连接成功时 publish(STATE_OPEN) 就没人收，
+        // 界面卡在"连接中"，必须手动切到设置再回来才刷新。
+        // listener 改到 onDestroy 里移除，renderState 有 isInitialized 检查保证安全。
         stopDotAnimation()
     }
 
-    override fun onCreateOptionsMenu(menu: Menu?): Boolean {
-        menu?.add(0, 200, 0, "历史")?.apply {
-            setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
-            setIcon(android.R.drawable.ic_menu_recent_history)
-        }
-        menu?.add(0, 100, 0, "设置")?.apply {
-            setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
-            setIcon(android.R.drawable.ic_menu_manage)
-        }
-        return super.onCreateOptionsMenu(menu)
+    override fun onDestroy() {
+        ConnectionBus.removeListener(stateListener)
+        super.onDestroy()
     }
 
-    override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        return when (item.itemId) {
-            100 -> {
-                startActivity(Intent(this, SettingsActivity::class.java))
-                true
-            }
-            200 -> {
-                startActivity(Intent(this, HistoryActivity::class.java))
-                true
-            }
-            else -> super.onOptionsItemSelected(item)
-        }
-    }
+    // 历史 / 设置入口已放到底部悬浮操作层，不再占用 ActionBar 菜单
 
     // MARK: - 状态卡（重设计：背景随状态变色，大号圆点 + 状态文字 + 服务器地址 + 启动按钮）
 
     private fun buildStatusCard(): View {
         val card = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = roundedBg(0xFFFFFFFF.toInt(), 28f)
-            setPadding(22, 20, 22, 20)
-            elevation = 8f
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            background = Design.outlinedBg(
+                this@MainActivity,
+                Design.Color.SURFACE,
+                Design.Color.BORDER_CARD,
+                Design.Radius.CARD
+            )
+            setPadding(
+                Design.dp(this@MainActivity, Design.Space.L),
+                Design.dp(this@MainActivity, 22f),
+                Design.dp(this@MainActivity, Design.Space.L),
+                Design.dp(this@MainActivity, Design.Space.L)
+            )
         }
 
-        // 大号圆形状态徽章（背景色随状态变化）
-        val badgeSize = 56
-        statusBadge = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            background = roundedBg(0xFFEEF2FF.toInt(), badgeSize / 2f)
-            layoutParams = LinearLayout.LayoutParams(badgeSize, badgeSize)
-        }
-        statusDot = TextView(this).apply {
-            text = "●"
-            textSize = 22f
-            setTextColor(0xFF9CA3AF.toInt())
-        }
-        statusBadge.addView(statusDot)
-        card.addView(statusBadge, LinearLayout.LayoutParams(
+        card.addView(buildStatusRing())
+
+        // 状态主文案 + 副文案
+        statusText = Design.text(this, "未连接", Design.Text.DISPLAY, Design.Color.INK, bold = true)
+        card.addView(statusText, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { rightMargin = 16 })
+        ).apply { topMargin = Design.dp(this@MainActivity, Design.Space.M) })
 
-        // 中间文字区（状态文字 + 服务器地址）
-        val textCol = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        statusHint = Design.text(this, " ", Design.Text.CAPTION, Design.Color.INK_MUTED).apply {
+            gravity = Gravity.CENTER
         }
-        statusText = TextView(this).apply {
-            text = "未连接"
-            textSize = 20f
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            setTextColor(0xFF1F2937.toInt())
+        card.addView(statusHint, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = Design.dp(this@MainActivity, Design.Space.XS) })
+
+        // 启动 / 停止：次要样式，避免和底部主按钮抢注意力
+        toggleBtn = Button(this).apply {
+            text = "启动同步"
+            setTextColor(Design.Color.INK_SECONDARY)
+            background = Design.outlinedBg(
+                this@MainActivity,
+                Design.Color.SURFACE,
+                Design.Color.BORDER,
+                Design.Radius.CHIP
+            )
+            textSize = Design.Text.BODY
+            setTypeface(typeface, android.graphics.Typeface.NORMAL)
+            stateListAnimator = null
+            val h = Design.dp(this@MainActivity, 22f)
+            val v = Design.dp(this@MainActivity, 9f)
+            setPadding(h, v, h, v)
+            setOnClickListener { toggleSync() }
         }
-        statusHint = TextView(this).apply {
-            text = " "
-            textSize = 12f
-            setTextColor(0xFF9CA3AF.toInt())
-            setPadding(0, 2, 0, 0)
-        }
-        // 服务器地址（带左侧小色条）
+        card.addView(toggleBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = Design.dp(this@MainActivity, 14f) })
+
+        // 分隔线 + 服务器脚注：地址是配置不是状态，降级处理
+        card.addView(Design.divider(this, Design.Color.BORDER_LIGHT), LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            Design.dp(this, 1f).coerceAtLeast(1)
+        ).apply { topMargin = Design.dp(this@MainActivity, 15f) })
+
         val targetRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 8, 0, 0)
         }
-        val targetBar = View(this).apply {
-            background = roundedBg(0xFF6366F1.toInt(), 2f)
-            layoutParams = LinearLayout.LayoutParams(3, 14)
-        }
-        targetText = TextView(this).apply {
-            textSize = 11f
-            setTextColor(0xFF6B7280.toInt())
-            typeface = android.graphics.Typeface.MONOSPACE
-            setPadding(8, 0, 0, 0)
+        targetRow.addView(
+            Design.text(this, "服务器", Design.Text.TAG, Design.Color.INK_MUTED)
+        )
+        targetText = Design.text(
+            this, "", Design.Text.MICRO, Design.Color.INK_SECONDARY, mono = true
+        ).apply {
             maxLines = 1
+            setPadding(Design.dp(this@MainActivity, 7f), 0, 0, 0)
         }
-        targetRow.addView(targetBar)
         targetRow.addView(targetText, LinearLayout.LayoutParams(
             0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
         ))
-        textCol.addView(statusText)
-        textCol.addView(statusHint)
-        textCol.addView(targetRow)
-        card.addView(textCol, LinearLayout.LayoutParams(
-            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
-        ))
-
-        // 右侧启动/停止按钮
-        toggleBtn = styledButton("启动", 0xFF22C55E.toInt(), 0xFFFFFFFF.toInt()) { toggleSync() }
-        val btnParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT,
+        targetRow.addView(
+            Design.text(this, "更改", Design.Text.MICRO, Design.Color.PRIMARY).apply {
+                isClickable = true
+                setOnClickListener {
+                    startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
+                }
+            }
+        )
+        card.addView(targetRow, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { leftMargin = 12 }
-        card.addView(toggleBtn, btnParams)
+        ).apply { topMargin = Design.dp(this@MainActivity, Design.Space.M) })
 
         renderTarget()
         return card
+    }
+
+    /**
+     * 状态光环：三层同心圆叠出层次，比单个字符圆点更有存在感。
+     * 三层颜色随连接状态整体切换（见 applyRingColors）。
+     */
+    private fun buildStatusRing(): View {
+        val size = Design.dp(this, 64f)
+        val midSize = Design.dp(this, 44f)
+        val coreSize = Design.dp(this, 18f)
+
+        ringOuter = FrameLayout(this).apply {
+            background = Design.circleBg(Design.Color.NEUTRAL_TINT_SOFT)
+            layoutParams = LinearLayout.LayoutParams(size, size)
+        }
+        ringMid = FrameLayout(this).apply {
+            background = Design.circleBg(Design.Color.NEUTRAL_TINT)
+        }
+        ringCore = View(this).apply {
+            background = Design.circleBg(Design.Color.NEUTRAL)
+        }
+        ringMid.addView(ringCore, FrameLayout.LayoutParams(coreSize, coreSize, Gravity.CENTER))
+        ringOuter.addView(ringMid, FrameLayout.LayoutParams(midSize, midSize, Gravity.CENTER))
+        return ringOuter
+    }
+
+    /** 一次性切换光环三层配色 */
+    private fun applyRingColors(outer: Int, mid: Int, core: Int) {
+        (ringOuter.background as? GradientDrawable)?.setColor(outer)
+        (ringMid.background as? GradientDrawable)?.setColor(mid)
+        (ringCore.background as? GradientDrawable)?.setColor(core)
     }
 
     // MARK: - 剪贴板预览卡（占满中间）
@@ -253,62 +429,86 @@ class MainActivity : AppCompatActivity() {
     private fun buildClipCard(): View {
         clipCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = roundedBg(0xFFFFFFFF.toInt(), 24f)
-            setPadding(24, 20, 24, 20)
-            elevation = 6f
+            background = Design.outlinedBg(
+                this@MainActivity,
+                Design.Color.SURFACE,
+                Design.Color.BORDER_CARD,
+                Design.Radius.CARD
+            )
+            val p = Design.dp(this@MainActivity, 15f)
+            setPadding(p, p, p, p)
         }
 
-        // 标题行：左侧色条 + "当前剪贴板"
+        // 标题行：标题 + 右侧类型标签（文本 / 图片）
         val titleRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, 12)
         }
-        val titleBar = View(this).apply {
-            background = roundedBg(0xFF6366F1.toInt(), 3f)
-            layoutParams = LinearLayout.LayoutParams(5, 20)
-        }
-        val title = TextView(this).apply {
-            text = "当前剪贴板"
-            textSize = 15f
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            setTextColor(0xFF1F2937.toInt())
-            setPadding(10, 0, 0, 0)
-        }
-        titleRow.addView(titleBar)
-        titleRow.addView(title)
-        clipCard.addView(titleRow)
-
-        // 内容区（自由高度，文本/图片按内容自适应）
-        val contentFrame = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+        titleRow.addView(
+            Design.text(this, "当前剪贴板", Design.Text.CARD_TITLE, Design.Color.INK, bold = true),
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        clipTypeTag = Design.text(this, "文本", Design.Text.TAG, Design.Color.INK_SECONDARY).apply {
+            background = Design.roundedBg(
+                this@MainActivity, Design.Color.CANVAS, Design.Radius.TAG
             )
-            background = roundedBg(0xFFF9FAFB.toInt(), 16f)
-            setPadding(20, 16, 20, 16)
+            val h = Design.dp(this@MainActivity, Design.Space.S)
+            val v = Design.dp(this@MainActivity, 3f)
+            setPadding(h, v, h, v)
         }
-        clipPreviewText = TextView(this).apply {
-            textSize = 14f
-            setTextColor(0xFF374151.toInt())
-            setLineSpacing(0f, 1.5f)
+        titleRow.addView(clipTypeTag)
+        clipCard.addView(titleRow, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
+
+        // 内容区：文本态固定 96dp，图片态按原图比例放大到能看全（见 showImagePreview）。
+        // 文本不撑开是为了让一行和一百行的卡片一样高；图片则必须完整显示，
+        // 反正按钮在悬浮层，卡片变高也推不动它。
+        clipContentFrame = FrameLayout(this).apply {
+            background = Design.outlinedBg(
+                this@MainActivity,
+                Design.Color.SUBTLE,
+                0xFFEEF0F3.toInt(),
+                Design.Radius.INPUT
+            )
+            clipToOutline = true
+        }
+        clipPreviewText = Design.text(this, "", Design.Text.CAPTION, 0xFF3A4048.toInt()).apply {
+            setLineSpacing(0f, 1.7f)
             gravity = Gravity.TOP
             visibility = View.GONE
+            val h = Design.dp(this@MainActivity, 13f)
+            val v = Design.dp(this@MainActivity, Design.Space.M)
+            setPadding(h, v, h, v)
         }
         clipPreviewImage = ImageView(this).apply {
+            // FIT_CENTER：整张图缩放进可视区，不裁边。配合下面按比例算出的高度，
+            // 上下不会留出多余空白
             scaleType = ImageView.ScaleType.FIT_CENTER
             visibility = View.GONE
-            background = roundedBg(0xFFF3F4F6.toInt(), 12f)
         }
-        contentFrame.addView(clipPreviewText, FrameLayout.LayoutParams(
+        clipContentFrame.addView(clipPreviewImage, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT
+            FrameLayout.LayoutParams.MATCH_PARENT
         ))
-        contentFrame.addView(clipPreviewImage, FrameLayout.LayoutParams(
+        clipContentFrame.addView(clipPreviewText, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT
+            FrameLayout.LayoutParams.MATCH_PARENT
         ))
-        clipCard.addView(contentFrame)
+        clipCard.addView(clipContentFrame, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            Design.dp(this, Design.CLIP_PREVIEW_HEIGHT)
+        ).apply { topMargin = Design.dp(this@MainActivity, 11f) })
+
+        // 脚注：说明预览是截断的，完整内容照样会推送
+        clipFootnote = Design.text(
+            this, "仅显示前几行，完整内容会一并推送", Design.Text.MICRO, Design.Color.INK_MUTED
+        )
+        clipCard.addView(clipFootnote, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = Design.dp(this@MainActivity, 9f) })
 
         return clipCard
     }
@@ -316,22 +516,24 @@ class MainActivity : AppCompatActivity() {
     // MARK: - 状态渲染
 
     private fun renderState(state: String) {
-        if (!::statusDot.isInitialized || !::statusText.isInitialized ||
-            !::statusHint.isInitialized || !::statusBadge.isInitialized ||
-            !::toggleBtn.isInitialized
+        if (isDestroyed) return
+        if (!::ringOuter.isInitialized || !::statusText.isInitialized ||
+            !::statusHint.isInitialized || !::toggleBtn.isInitialized
         ) {
             return
         }
         when (state) {
             ConnectionBus.STATE_OPEN -> {
                 stopDotAnimation()
-                statusDot.setTextColor(0xFF22C55E.toInt())
-                (statusBadge.background as? GradientDrawable)?.setColor(0xFFDCFCE7.toInt())
+                applyRingColors(
+                    Design.Color.SUCCESS_TINT_SOFT,
+                    Design.Color.SUCCESS_TINT,
+                    Design.Color.SUCCESS
+                )
                 statusText.text = "已连接"
-                statusHint.text = "同步中，可正常收发消息"
-                statusHint.setTextColor(0xFF9CA3AF.toInt())
-                toggleBtn.text = "停止"
-                (toggleBtn.background as? GradientDrawable)?.setColor(0xFFEF4444.toInt())
+                statusHint.text = "同步中，可正常收发内容"
+                statusHint.setTextColor(Design.Color.INK_MUTED)
+                toggleBtn.text = "停止同步"
                 toggleBtn.isEnabled = true
                 // 已连接成功，清掉"曾在连接中"标记，避免之后正常断开也弹失败
                 lastWasConnecting = false
@@ -339,13 +541,15 @@ class MainActivity : AppCompatActivity() {
             }
             ConnectionBus.STATE_CONNECTING -> {
                 startDotAnimation()
-                statusDot.setTextColor(0xFFF59E0B.toInt())
-                (statusBadge.background as? GradientDrawable)?.setColor(0xFFFEF3C7.toInt())
+                applyRingColors(
+                    Design.Color.WARNING_TINT_SOFT,
+                    Design.Color.WARNING_TINT,
+                    Design.Color.WARNING
+                )
                 statusText.text = "连接中"
                 statusHint.text = "正在连接服务器…"
-                statusHint.setTextColor(0xFF9CA3AF.toInt())
-                toggleBtn.text = "取消"
-                (toggleBtn.background as? GradientDrawable)?.setColor(0xFFEF4444.toInt())
+                statusHint.setTextColor(Design.Color.INK_MUTED)
+                toggleBtn.text = "取消连接"
                 toggleBtn.isEnabled = true
                 lastWasConnecting = true
                 return
@@ -357,28 +561,33 @@ class MainActivity : AppCompatActivity() {
                 val serviceAlive = SyncService.activeWs() != null && reason == null
                 if (serviceAlive) {
                     startDotAnimation()
-                    statusDot.setTextColor(0xFFF59E0B.toInt())
-                    (statusBadge.background as? GradientDrawable)?.setColor(0xFFFEF3C7.toInt())
+                    applyRingColors(
+                        Design.Color.WARNING_TINT_SOFT,
+                        Design.Color.WARNING_TINT,
+                        Design.Color.WARNING
+                    )
                     statusText.text = "重连中"
                     statusHint.text = "连接中断，正在自动重连…"
-                    toggleBtn.text = "取消"
-                    (toggleBtn.background as? GradientDrawable)?.setColor(0xFFEF4444.toInt())
+                    statusHint.setTextColor(Design.Color.INK_MUTED)
+                    toggleBtn.text = "取消连接"
                 } else {
                     stopDotAnimation()
-                    statusDot.setTextColor(0xFF9CA3AF.toInt())
-                    (statusBadge.background as? GradientDrawable)?.setColor(0xFFEEF2FF.toInt())
+                    applyRingColors(
+                        Design.Color.NEUTRAL_TINT_SOFT,
+                        Design.Color.NEUTRAL_TINT,
+                        Design.Color.NEUTRAL
+                    )
                     statusText.text = "未连接"
                     // 优先展示服务端 / 网络层给出的具体原因，笼统提示只作兜底
                     statusHint.text = when {
                         reason != null -> reason
-                        lastWasConnecting -> "连接失败，请检查网络或服务器后再次启动"
-                        else -> "点「启动」开始同步"
+                        lastWasConnecting -> "连接失败，请检查网络或服务器后重试"
+                        else -> "点「启动同步」开始"
                     }
                     statusHint.setTextColor(
-                        if (reason != null) 0xFFDC2626.toInt() else 0xFF9CA3AF.toInt()
+                        if (reason != null) Design.Color.DANGER else Design.Color.INK_MUTED
                     )
-                    toggleBtn.text = "启动"
-                    (toggleBtn.background as? GradientDrawable)?.setColor(0xFF22C55E.toInt())
+                    toggleBtn.text = "启动同步"
                 }
                 toggleBtn.isEnabled = true
                 lastWasConnecting = false
@@ -392,8 +601,8 @@ class MainActivity : AppCompatActivity() {
         // 展示规范化后的完整地址，让用户看到程序实际连的是哪里（ws:// 是自动补的）
         val server = com.clipsync.net.ServerAddress.normalize(raw).ifEmpty { "未填写服务器地址" }
         // 账号密码没填就连不上；token 由连接时自动换取，不需要用户关心
-        val tip = if (com.clipsync.net.AuthClient.hasCredentials(this)) "" else "  ·  ⚠ 未填写账号密码"
-        targetText.text = "🔗  $server$tip"
+        val tip = if (com.clipsync.net.AuthClient.hasCredentials(this)) "" else "  ·  未填账号密码"
+        targetText.text = "$server$tip"
     }
 
     // MARK: - 剪贴板预览（修复图片显示）
@@ -415,31 +624,26 @@ class MainActivity : AppCompatActivity() {
         if (clipImage != null) {
             val bmp = ClipboardManagerHelper.decodeImageUri(clipImage)
             if (bmp != null) {
-                clipPreviewImage.setImageBitmap(bmp)
-                clipPreviewImage.visibility = View.VISIBLE
-                clipPreviewText.visibility = View.GONE
-                pushBtn.isEnabled = true
-                pushBtn.alpha = 1f
+                showImagePreview(
+                    bmp, "图片",
+                    "${bmp.width} × ${bmp.height} · 点「推送到电脑」发送原图"
+                )
                 return
             }
             android.util.Log.w("ClipSync", "refreshClipPreview: 图片解码失败 uri=$clipImage")
-            clipPreviewImage.visibility = View.GONE
-            clipPreviewText.visibility = View.VISIBLE
-            clipPreviewText.text = "（图片无法预览，但仍可尝试推送）"
-            pushBtn.isEnabled = true
-            pushBtn.alpha = 1f
+            showTextPreview("（图片无法预览，但仍可尝试推送）", "图片", "解码失败，仍可尝试推送原图")
             return
         }
 
         // 3. 剪贴板文本
         val text = ClipboardManagerHelper.peekText()
         if (!text.isNullOrBlank()) {
-            clipPreviewImage.visibility = View.GONE
-            clipPreviewImage.setImageDrawable(null)
-            clipPreviewText.visibility = View.VISIBLE
-            clipPreviewText.text = text
-            pushBtn.isEnabled = true
-            pushBtn.alpha = 1f
+            val chars = text.length
+            showTextPreview(
+                text,
+                "文本 · $chars 字",
+                if (chars > 120) "仅显示前几行，完整内容会一并推送" else "内容将完整推送"
+            )
             return
         }
 
@@ -450,43 +654,139 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 5. 什么都没有
+        showEmptyPreview()
+    }
+
+    /** 文本态：显示文字、隐藏图片，并同步标签与脚注 */
+    private fun showTextPreview(body: CharSequence, tag: String, footnote: String) {
         clipPreviewImage.visibility = View.GONE
         clipPreviewImage.setImageDrawable(null)
+        // 复位高度：从图片态切回来时若不复位，文字下面会留一大块空白
+        setPreviewHeight(Design.dp(this, Design.CLIP_PREVIEW_HEIGHT))
+        resetPreviewBackground()
         clipPreviewText.visibility = View.VISIBLE
-        clipPreviewText.text = "（剪贴板为空）"
-        pushBtn.isEnabled = false
-        pushBtn.alpha = 0.5f
+        clipPreviewText.text = body
+        clipTypeTag.visibility = View.VISIBLE
+        clipTypeTag.text = tag
+        resetTagStyle()
+        clipFootnote.visibility = View.VISIBLE
+        clipFootnote.text = footnote
+        setPushEnabled(true)
+    }
+
+    /** 图片态：按原图比例撑到能看全，最多到 CLIP_IMAGE_MAX_HEIGHT */
+    private fun showImagePreview(bmp: Bitmap, tag: String, footnote: String) {
+        clipPreviewText.visibility = View.GONE
+        clipPreviewImage.setImageBitmap(bmp)
+        clipPreviewImage.visibility = View.VISIBLE
+        applyImageHeight(bmp)
+        // 竖图缩进来后两侧会留白，浅底配深色截图显得空，换成中性灰衬底
+        (clipContentFrame.background as? GradientDrawable)?.setColor(0xFFEDEFF2.toInt())
+        clipTypeTag.visibility = View.VISIBLE
+        clipTypeTag.text = tag
+        resetTagStyle()
+        clipFootnote.visibility = View.VISIBLE
+        clipFootnote.text = footnote
+        setPushEnabled(true)
+    }
+
+    /**
+     * 给图片预览区定高，保证整张图都看得见。
+     *
+     * 原来是固定 96dp + CENTER_CROP，竖图只能露出中间一条。
+     * 现在按原图比例算需要多高：横图和方图能铺满宽度就铺满；
+     * 竖图（手机截图都是）铺满宽度要 2000px 以上，屏幕放不下，
+     * 所以到上限就封顶，由 FIT_CENTER 把整张图缩进去、两侧留白。
+     * 无论哪种情况都不裁切——这是「显示不全」的根治点。
+     */
+    private fun applyImageHeight(bmp: Bitmap) {
+        val maxHeight = Design.dp(this, Design.CLIP_IMAGE_MAX_HEIGHT)
+        val minHeight = Design.dp(this, 72f)
+        val available = clipContentFrame.width
+        if (available <= 0 || bmp.width <= 0) {
+            // 首帧还没测量出宽度，先用上限占位，测完再按真实比例收一次
+            setPreviewHeight(maxHeight)
+            clipContentFrame.post { applyImageHeight(bmp) }
+            return
+        }
+        val needed = available.toFloat() * bmp.height / bmp.width
+        setPreviewHeight(needed.toInt().coerceIn(minHeight, maxHeight))
+    }
+
+    private fun setPreviewHeight(px: Int) {
+        val lp = clipContentFrame.layoutParams
+        if (lp.height != px) {
+            lp.height = px
+            clipContentFrame.layoutParams = lp
+        }
+    }
+
+    /** 文本/空态复位衬底色，否则会残留图片态的中性灰 */
+    private fun resetPreviewBackground() {
+        (clipContentFrame.background as? GradientDrawable)?.setColor(Design.Color.SUBTLE)
+    }
+
+    /**
+     * 复位类型标签配色。
+     * 截图分支会把标签改成主色调，不复位的话会残留到下一次普通图片/文本预览。
+     */
+    private fun resetTagStyle() {
+        clipTypeTag.setTextColor(Design.Color.INK_SECONDARY)
+        (clipTypeTag.background as? GradientDrawable)?.setColor(Design.Color.CANVAS)
+    }
+
+    /** 空态：主按钮置灰，避免用户点了才知道没内容 */
+    private fun showEmptyPreview() {
+        clipPreviewImage.visibility = View.GONE
+        clipPreviewImage.setImageDrawable(null)
+        setPreviewHeight(Design.dp(this, Design.CLIP_PREVIEW_HEIGHT))
+        resetPreviewBackground()
+        clipPreviewText.visibility = View.VISIBLE
+        clipPreviewText.text = "剪贴板为空\n复制任意内容后回到这里"
+        clipTypeTag.visibility = View.GONE
+        clipFootnote.visibility = View.GONE
+        setPushEnabled(false)
+    }
+
+    /** 主按钮启用态：连背景色一起换，置灰要看得出来 */
+    private fun setPushEnabled(enabled: Boolean) {
+        pushBtn.isEnabled = enabled
+        (pushBtn.background as? GradientDrawable)?.setColor(
+            if (enabled) Design.Color.PRIMARY else Design.Color.DISABLED_BG
+        )
+        pushBtn.setTextColor(
+            if (enabled) Design.Color.SURFACE else Design.Color.INK_DISABLED
+        )
     }
 
     private fun showScreenshot(shot: android.net.Uri) {
         val bmp = ClipboardManagerHelper.decodeImageUri(shot)
         if (bmp != null) {
-            clipPreviewImage.setImageBitmap(bmp)
-            clipPreviewImage.visibility = View.VISIBLE
-            clipPreviewText.visibility = View.VISIBLE
-            clipPreviewText.text = "📷 新截图 · 点击推送发送到电脑"
-            pushBtn.isEnabled = true
-            pushBtn.alpha = 1f
+            val size = "${bmp.width} × ${bmp.height}"
+            showImagePreview(bmp, "新截图", "$size · 点「推送到电脑」发送原图")
+            // 截图标签用主色调，和普通图片区分开
+            clipTypeTag.setTextColor(Design.Color.PRIMARY_PRESSED)
+            (clipTypeTag.background as? GradientDrawable)?.setColor(Design.Color.PRIMARY_TINT)
             android.util.Log.i("ClipSync", "refreshClipPreview: 回落截图 $shot")
         }
     }
 
     private fun pushClipboard() {
         if (!ClipboardManagerHelper.hasContent()) {
-            Toast.makeText(this, "剪贴板为空", Toast.LENGTH_SHORT).show()
+            toast.show("剪贴板为空", Design.Color.NEUTRAL)
             return
         }
         if (ConnectionBus.current != ConnectionBus.STATE_OPEN) {
-            Toast.makeText(this, "未连接，请先启动同步", Toast.LENGTH_SHORT).show()
+            toast.show("未连接，请先启动同步", Design.Color.WARNING)
             return
         }
         when (ClipboardManagerHelper.manualUpload()) {
             com.clipsync.clipboard.ClipboardManagerHelper.UploadResult.SENT ->
-                Toast.makeText(this, "已推送", Toast.LENGTH_SHORT).show()
+                toast.show("已推送到电脑", Design.Color.SUCCESS)
             com.clipsync.clipboard.ClipboardManagerHelper.UploadResult.QUEUED ->
-                Toast.makeText(this, "已推送（离线暂存，连上自动发）", Toast.LENGTH_SHORT).show()
+                toast.show("已暂存，连上后自动发送", Design.Color.WARNING)
             com.clipsync.clipboard.ClipboardManagerHelper.UploadResult.FAILED ->
-                Toast.makeText(this, "推送失败，请重试", Toast.LENGTH_SHORT).show()
+                toast.show("推送失败，请重试", Design.Color.DANGER)
         }
     }
 
@@ -538,6 +838,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startSync() {
+        // 标记用户希望同步运行。SmsReceiver / NotificationSmsListener 看到这个标记才
+        // 会拉起服务；用户主动 stopSync() 或划进程后这个标记会被清掉。
+        SyncService.setUserEnabled(this, true)
         // 带上 ACTION_CONNECT：服务已存活但连接没建起来时，让它重试而不是空转
         val intent = Intent(this, SyncService::class.java).apply {
             action = SyncService.ACTION_CONNECT
@@ -549,7 +852,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 启动时自动连接（功能设置里可关，默认开） */
+    /**
+     * 启动时自动连接（设置里可关，默认开）。
+     *
+     * 用户的使用习惯：想用时点开 App，进来就该是连好的，不用再点一下「启动」；
+     * 要停就手动把 App 从最近任务划掉（= 停止同步，下次打开再自动连）。
+     * 如果某次想静默进 App 不连，设置里关掉「启动时自动连接」即可。
+     */
     private fun autoConnectIfNeeded() {
         val sp = getSharedPreferences("clipsync", MODE_PRIVATE)
         if (!sp.getBoolean("auto_connect", true)) return
@@ -561,6 +870,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun stopSync() {
+        // 同步未启用 → 后续短信直接丢弃，不会因为一条验证码又把服务拉起来
+        SyncService.setUserEnabled(this, false)
         stopService(Intent(this, SyncService::class.java))
         // 主动停止不是"失败"，把上一次的错误原因清掉，别让红字留在界面上
         ConnectionBus.publish(ConnectionBus.STATE_CLOSED, null)
@@ -568,10 +879,16 @@ class MainActivity : AppCompatActivity() {
         lastWasConnecting = false
     }
 
+    /**
+     * 连接中的呼吸动画。
+     * 缩放中圈而不是改透明度：光环有三层，只淡入淡出内核看不出来，
+     * 中圈轻微搏动更接近"正在尝试"的感觉。
+     */
     private fun startDotAnimation() {
         if (dotAnimator?.isStarted == true) return
-        dotAnimator = ObjectAnimator.ofFloat(statusDot, "alpha", 1f, 0.15f).apply {
-            duration = 700
+        if (!::ringMid.isInitialized) return
+        dotAnimator = ObjectAnimator.ofFloat(ringMid, "alpha", 1f, 0.35f).apply {
+            duration = 800
             repeatCount = ValueAnimator.INFINITE
             repeatMode = ValueAnimator.REVERSE
             interpolator = AccelerateDecelerateInterpolator()
@@ -582,32 +899,6 @@ class MainActivity : AppCompatActivity() {
     private fun stopDotAnimation() {
         dotAnimator?.cancel()
         dotAnimator = null
-        statusDot.alpha = 1f
+        if (::ringMid.isInitialized) ringMid.alpha = 1f
     }
-
-    // MARK: - UI 辅助
-
-    private fun styledButton(text: String, bgColor: Int, textColor: Int, onClick: () -> Unit): Button {
-        val drawable = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = 22f
-            setColor(bgColor)
-        }
-        return Button(this).apply {
-            this.text = text
-            setTextColor(textColor)
-            background = drawable
-            setPadding(28, 24, 28, 24)
-            textSize = 14f
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            setOnClickListener { onClick() }
-        }
-    }
-
-    private fun roundedBg(color: Int, radius: Float): GradientDrawable =
-        GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = radius
-            setColor(color)
-        }
 }

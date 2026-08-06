@@ -43,12 +43,6 @@
             android:label="设置" />
 
         <activity
-            android:name=".ui.FuncSettingsActivity"
-            android:exported="false"
-            android:parentActivityName=".ui.SettingsActivity"
-            android:label="功能设置" />
-
-        <activity
             android:name=".ui.PermissionSettingsActivity"
             android:exported="false"
             android:parentActivityName=".ui.SettingsActivity"
