@@ -221,8 +221,9 @@ jobs:
           COPY app/ /app/
           COPY scratch/ /scratch/
           EOF
-          docker build -t ghcr.io/${{ github.repository_owner }}/clipsync-android:${{ steps.ver.outputs.VERSION }} \
-                       -t ghcr.io/${{ github.repository_owner }}/clipsync-android:latest "$STAGE"
+          OWNER_LC="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          docker build -t ghcr.io/$OWNER_LC/clipsync-android:${{ steps.ver.outputs.VERSION }} \
+                       -t ghcr.io/$OWNER_LC/clipsync-android:latest "$STAGE"
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -233,6 +234,7 @@ jobs:
 
       - name: Push 容器包
         run: |
-          docker push ghcr.io/${{ github.repository_owner }}/clipsync-android:${{ steps.ver.outputs.VERSION }}
-          docker push ghcr.io/${{ github.repository_owner }}/clipsync-android:latest
-          echo "✅ 已推 ghcr.io/${{ github.repository_owner }}/clipsync-android"
+          OWNER_LC="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          docker push ghcr.io/$OWNER_LC/clipsync-android:${{ steps.ver.outputs.VERSION }}
+          docker push ghcr.io/$OWNER_LC/clipsync-android:latest
+          echo "✅ 已推 ghcr.io/$OWNER_LC/clipsync-android"
