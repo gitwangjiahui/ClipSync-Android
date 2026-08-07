@@ -11,10 +11,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/gitwangjiahui/ClipSync-Android/releases">⬇️ 下载 APK</a> ·
-  <a href="https://github.com/orgs/gitwangjiahui/packages">📦 Packages (ghcr.io)</a> ·
-  <a href="https://github.com/gitwangjiahui/ClipSync-Server">🖧 服务端</a> ·
-  <a href="https://github.com/gitwangjiahui/ClipSync-Mac">🖥️ Mac 端</a>
+  <a href="https://github.com/JH-Clipsync/ClipSync-Android/releases">⬇️ 下载 APK</a> ·
+  <a href="https://github.com/orgs/JH-Clipsync/packages">📦 Packages (ghcr.io)</a> ·
+  <a href="https://github.com/JH-Clipsync/ClipSync-Server">🖧 服务端</a> ·
+  <a href="https://github.com/JH-Clipsync/ClipSync-Mac">🖥️ Mac 端</a>
 </p>
 
 ---
@@ -32,7 +32,7 @@
 
 ## 二、下载与安装
 
-到 [Releases](https://github.com/gitwangjiahui/ClipSync-Android/releases) 下载 `ClipSync-vX.Y.Z-release.apk`（已签名，v2 签名方案）。
+到 [Releases](https://github.com/JH-Clipsync/ClipSync-Android/releases) 下载 `ClipSync-vX.Y.Z-release.apk`（已签名，v2 签名方案）。
 
 1. 传到手机打开安装（首次需开启「允许安装未知来源应用」）
 2. 打开 App → 设置里填 **服务器地址**（如 `ws://192.168.1.100:8080`）和 **Token**（与电脑端一致即自动配对）
