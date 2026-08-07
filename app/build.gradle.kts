@@ -11,7 +11,7 @@ val localProps = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
-val defaultServer = localProps.getProperty("clipsync.server", "ws://192.168.1.1:8080")
+val defaultServer = localProps.getProperty("clipsync.server", "ws://127.0.0.1:8080")
 // token 不再由构建期注入：改为登录接口签发。这里只保留一个默认用户名方便本地联调。
 val defaultUsername = localProps.getProperty("clipsync.username", "")
 
@@ -23,8 +23,8 @@ android {
         applicationId = "com.clipsync"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.2.1"
 
         // 把默认配置作为 BuildConfig 常量注入到代码里
         buildConfigField("String", "DEFAULT_SERVER", "\"$defaultServer\"")

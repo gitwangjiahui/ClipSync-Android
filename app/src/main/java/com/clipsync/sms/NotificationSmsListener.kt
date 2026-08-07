@@ -22,14 +22,35 @@ class NotificationSmsListener : NotificationListenerService() {
         private val SMS_APPS = setOf(
             "com.android.mms",                    // AOSP / MIUI 系统短信
             "com.google.android.apps.messaging",  // Google 短信
-            "com.samsung.android.messaging",
-            "com.miui.securitycenter"             // 小米安全中心可能中转
+            "com.samsung.android.messaging"
+        )
+
+        // 明确排除的系统管家类 App（这些包的所有通知都不处理）
+        private val BLOCKED_PACKAGES = setOf(
+            "com.miui.securitycenter",            // 小米安全中心 / 手机管家
+            "com.miui.cleanmaster",               // 小米清理大师
+            "com.miui.antivirus",                  // 小米杀毒
+            "com.miui.guardprovider"               // 小米守卫/安全组件
         )
 
         // 识别 MIUI/HyperOS 在"短信"通知渠道里发的系统运行状态提示关键词
         // 典型内容：【"短信"正在运行】点按即可了解详情或停止应用。
         private val OP_ANY = listOf("正在运行", "点按即可了解详情", "停止应用")
         private val CHANNEL_ANY = listOf("短信", "Messaging", "Messages")
+
+        // 识别系统硬件/状态通知（非短信），例如：
+        //   【退出快充加速】息屏后极致加速，设备温度略有升高
+        //   【省电模式已开启】
+        //   【电池温度过高】
+        //   【"短信"正在运行】
+        private val SYSTEM_NOTICE_KEYWORDS = listOf(
+            "快充", "充电", "加速", "设备温度", "温度升高",
+            "省电模式", "超级省电", "电池", "电量",
+            "息屏", "锁屏", "后台运行",
+            "流量", "移动数据", "WiFi已", "蓝牙已",
+            "正在运行", "点按即可了解详情", "停止应用",
+            "退出", "已开启", "已关闭"
+        )
     }
 
     override fun onListenerConnected() {
@@ -42,6 +63,18 @@ class NotificationSmsListener : NotificationListenerService() {
         if (!SyncService.isUserEnabled(this)) return
 
         val pkg = sbn.packageName ?: return
+
+        // 先拉黑安全中心/手机管家类 App：这些的所有通知都不处理
+        if (BLOCKED_PACKAGES.contains(pkg) ||
+            pkg.contains("securitycenter", ignoreCase = true) ||
+            pkg.contains("cleanmaster", ignoreCase = true) ||
+            pkg.contains("antivirus", ignoreCase = true) ||
+            pkg.contains("guardprovider", ignoreCase = true) ||
+            pkg.contains("phoneclean", ignoreCase = true)) {
+            Log.i(TAG, "⏸ 跳过系统管家类通知 pkg=$pkg")
+            return
+        }
+
         // 只处理短信 App 的通知
         val isSmsApp = SMS_APPS.contains(pkg) ||
             pkg.contains("mms", ignoreCase = true) ||
@@ -59,6 +92,14 @@ class NotificationSmsListener : NotificationListenerService() {
         // 这种不是真实短信，必须在任何数据库查询前就拦掉，避免误上行。
         if (isSystemChannelNotice(title, text, bigText)) {
             Log.i(TAG, "⏸ 跳过系统短信渠道状态提示: ${text.take(60)}")
+            return
+        }
+
+        // 过滤系统硬件/状态通知（通过短信渠道发出的非短信内容），例如：
+        //   【退出快充加速】息屏后极致加速，设备温度略有升高
+        //   【"短信"正在运行】点按即可了解详情或停止应用
+        if (isSystemNotice(title, text, bigText)) {
+            Log.i(TAG, "⏸ 跳过系统通知: ${text.take(60)}")
             return
         }
 
@@ -137,6 +178,15 @@ class NotificationSmsListener : NotificationListenerService() {
         val hasOp = OP_ANY.any { combined.contains(it) }
         // 两个条件必须同时满足，避免误杀真实短信
         return channelTitle && hasChannel && hasOp
+    }
+
+    /**
+     * 识别通过短信渠道发出的系统通知（硬件/状态/运行提示）。
+     * 只要标题或正文包含任一系统关键词即判为非短信。
+     */
+    private fun isSystemNotice(title: String, text: String, bigText: String): Boolean {
+        val combined = listOf(title, text, bigText).joinToString(" ")
+        return SYSTEM_NOTICE_KEYWORDS.any { combined.contains(it) }
     }
 
     /**

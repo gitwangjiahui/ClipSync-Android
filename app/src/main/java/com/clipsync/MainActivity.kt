@@ -3,6 +3,7 @@ package com.clipsync
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -23,6 +24,7 @@ import com.clipsync.state.ConnectionBus
 import com.clipsync.ui.Design
 import com.clipsync.ui.HistoryActivity
 import com.clipsync.ui.SettingsActivity
+import com.clipsync.ui.ThemeManager
 
 /**
  * 主界面。
@@ -71,6 +73,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ThemeManager.init(this)
         title = "ClipSync"
         ClipboardManagerHelper.loadPrefs(this)
         // 重要：先初始化 ClipboardManagerHelper，否则主页预览拿不到剪贴板
@@ -169,8 +172,7 @@ class MainActivity : AppCompatActivity() {
                 Design.dp(this@MainActivity, Design.Space.L),
                 Design.dp(this@MainActivity, Design.Space.L)
             )
-            // 0xEB ≈ 92% 不透明，留一点内容透出来强化悬浮感
-            setBackgroundColor(0xEBFFFFFF.toInt())
+            setBackgroundColor(Design.Color.ACTION_BAR)
             elevation = Design.dp(this@MainActivity, 12f).toFloat()
         }
 
@@ -290,6 +292,12 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         ConnectionBus.removeListener(stateListener)
         super.onDestroy()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        ThemeManager.refresh(this)
+        recreate()
     }
 
     // 历史 / 设置入口已放到底部悬浮操作层，不再占用 ActionBar 菜单
@@ -469,12 +477,12 @@ class MainActivity : AppCompatActivity() {
             background = Design.outlinedBg(
                 this@MainActivity,
                 Design.Color.SUBTLE,
-                0xFFEEF0F3.toInt(),
+                Design.Color.BORDER,
                 Design.Radius.INPUT
             )
             clipToOutline = true
         }
-        clipPreviewText = Design.text(this, "", Design.Text.CAPTION, 0xFF3A4048.toInt()).apply {
+        clipPreviewText = Design.text(this, "", Design.Text.CAPTION, Design.Color.INK_SECONDARY).apply {
             setLineSpacing(0f, 1.7f)
             gravity = Gravity.TOP
             visibility = View.GONE
@@ -681,7 +689,7 @@ class MainActivity : AppCompatActivity() {
         clipPreviewImage.visibility = View.VISIBLE
         applyImageHeight(bmp)
         // 竖图缩进来后两侧会留白，浅底配深色截图显得空，换成中性灰衬底
-        (clipContentFrame.background as? GradientDrawable)?.setColor(0xFFEDEFF2.toInt())
+        (clipContentFrame.background as? GradientDrawable)?.setColor(Design.Color.SUBTLE)
         clipTypeTag.visibility = View.VISIBLE
         clipTypeTag.text = tag
         resetTagStyle()

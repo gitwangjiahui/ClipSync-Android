@@ -281,6 +281,8 @@ class PermissionSettingsActivity : AppCompatActivity() {
             "通知使用权" -> openNotificationListenerSettings()
             "通知监听已连接" -> rebindNotificationListener()
             "电池策略无限制" -> requestIgnoreBatteryOptimization()
+            "通知类短信" -> openMiuiAppPermEditor()
+            "后台弹窗" -> openMiuiAppPermEditor()
         }
     }
 
@@ -373,6 +375,44 @@ class PermissionSettingsActivity : AppCompatActivity() {
         } catch (e: Exception) {
             toast("请手动进入：设置 → 应用管理 → ClipSync → 自启动", Design.Color.NEUTRAL)
         }
+    }
+
+    /**
+     * 跳转 MIUI/HyperOS 应用权限编辑页。
+     *
+     * 「通知类短信」「后台弹窗」等厂商扩展权限都在这个页面里，
+     * 标准 Android API 无法直接跳到具体子项，只能打开整个权限编辑页让用户手动找。
+     */
+    private fun openMiuiAppPermEditor() {
+        val candidates = listOf(
+            // HyperOS / MIUI 14+
+            Intent("miui.intent.action.APP_PERM_EDITOR").apply {
+                putExtra("miui.intent.extra.package_name", packageName)
+            },
+            // MIUI 12/13
+            Intent().setClassName("com.miui.securitycenter",
+                "com.miui.permcenter.permissions.PermissionsEditorActivity").apply {
+                putExtra("extra_package_name", packageName)
+            },
+            // 旧版 MIUI
+            Intent().setClassName("com.miui.securitycenter",
+                "com.miui.permcenter.activity.PermissionsEditorActivity").apply {
+                putExtra("extra_package_name", packageName)
+            }
+        )
+        for (intent in candidates) {
+            try {
+                intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                if (packageManager.resolveActivity(intent, 0) != null) {
+                    startActivity(intent)
+                    toast("找到「通知类短信」和「后台弹窗」并开启", Design.Color.NEUTRAL)
+                    return
+                }
+            } catch (_: Exception) { /* 试下一个 */ }
+        }
+        // 兜底：跳应用详情页
+        openAppDetails()
+        toast("请在应用设置中开启通知类短信和后台弹窗", Design.Color.NEUTRAL)
     }
 
     /**

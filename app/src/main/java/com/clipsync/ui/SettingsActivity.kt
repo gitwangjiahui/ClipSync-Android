@@ -1,6 +1,7 @@
 package com.clipsync.ui
 
 import android.content.Intent
+import android.content.res.Configuration
 import android.os.Bundle
 import android.text.InputType
 import android.view.View
@@ -47,6 +48,7 @@ class SettingsActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ThemeManager.init(this)
         title = "设置"
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
 
@@ -96,6 +98,12 @@ class SettingsActivity : AppCompatActivity() {
                 SyncService.restart(this)
             }
         }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        ThemeManager.refresh(this)
+        recreate()
     }
 
     private fun connectionSnapshot(): List<String> {
@@ -152,12 +160,12 @@ class SettingsActivity : AppCompatActivity() {
         val sp = getSharedPreferences("clipsync", MODE_PRIVATE)
         val current = sp.getString("server", null) ?: BuildConfig.DEFAULT_SERVER
         val input = DesignDialog.input(
-            this, "例如 192.168.1.10:8080",
+            this, "例如 127.0.0.1:8080",
             ServerAddress.displayForm(current),
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         )
         DesignDialog.show(
-            this, "服务器地址", "只填地址和端口，ws:// 前缀会自动补上",
+            this, "服务器地址", "可填 wss:// 或 ws:// 开头的完整地址，也可只填地址和端口",
             body = { it.addView(input, matchWrap()) }
         ) {
             val normalized = ServerAddress.normalize(input.text.toString())

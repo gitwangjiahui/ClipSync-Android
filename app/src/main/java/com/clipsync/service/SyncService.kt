@@ -42,6 +42,8 @@ class SyncService : Service() {
         const val ACTION_SEND_SHARE = "com.clipsync.SEND_SHARE"
         /** 显式的"重试连接"请求：服务活着但连接没建起来时用它踢一脚 */
         const val ACTION_CONNECT = "com.clipsync.CONNECT"
+        /** 从 PendingSmsQueue（持久化待发短信队列）读所有未发送的短信并发出 */
+        const val ACTION_FLUSH_PENDING_SMS = "com.clipsync.FLUSH_PENDING_SMS"
         const val EXTRA_TEXT = "text"
         const val EXTRA_PREVIEW = "preview"
         const val EXTRA_DATA = "data"
@@ -568,6 +570,35 @@ class SyncService : Service() {
                 if (ws == null) {
                     Log.i("ClipSync", "↻ 收到连接请求，重新尝试建立连接")
                     connectWs()
+                }
+            }
+            ACTION_FLUSH_PENDING_SMS -> {
+                // 持久化队列里的短信：冷启动时由 SmsReceiver 写入。
+                // 先全部挪到内存队列，清空持久化；再根据 ws 连接情况决定立即发 or 等连上后发。
+                // 这样"拉起服务失败→下次 App 打开"也能补发，不会永远留在磁盘里。
+                val items = com.clipsync.sms.PendingSmsQueue.load(this)
+                if (items.isNotEmpty()) {
+                    com.clipsync.sms.PendingSmsQueue.clear(this)
+                    synchronized(pendingSms) {
+                        pendingSms.addAll(items.map { it.text to it.preview })
+                    }
+                    Log.i("ClipSync", "📥 从持久化队列加载 ${items.size} 条待发短信")
+                }
+                val wsClient = ws
+                when {
+                    wsClient == null -> {
+                        // ws 还没初始化：等 connectWs -> 连接 OPEN -> flushPendingSms 自动发
+                        Log.i("ClipSync", "📤 短信已入内存队列，等待连接就绪后补发")
+                        if (ws == null) connectWs()
+                    }
+                    wsClient.state.value == WsClient.State.OPEN -> {
+                        // 已经连上，立刻发
+                        flushPendingSms()
+                    }
+                    else -> {
+                        // 连接中/退避中：等 OPEN 后 flushPendingSms 自动触发
+                        Log.i("ClipSync", "📤 短信已入内存队列，连接中稍后补发")
+                    }
                 }
             }
             ACTION_SEND_SMS_CODE -> {

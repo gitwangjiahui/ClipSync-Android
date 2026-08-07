@@ -1,5 +1,6 @@
 package com.clipsync.ui
 
+import android.content.res.Configuration
 import android.os.Bundle
 import android.text.format.DateUtils
 import android.view.Gravity
@@ -34,6 +35,7 @@ class HistoryActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ThemeManager.init(this)
         title = "历史记录"
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
 
@@ -381,5 +383,11 @@ class HistoryActivity : AppCompatActivity() {
         private const val FILTER_SMS = "sms"
         private const val FILTER_CLIP = "clip"
         private const val MENU_CLEAR = 1
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        ThemeManager.refresh(this)
+        recreate()
     }
 }

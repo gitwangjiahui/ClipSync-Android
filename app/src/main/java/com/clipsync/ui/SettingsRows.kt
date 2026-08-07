@@ -219,7 +219,7 @@ object SettingsRows {
         }
 
     private fun chevron(ctx: Context): TextView =
-        Design.text(ctx, "›", 15f, 0xFFC4C9D1.toInt()).apply {
+        Design.text(ctx, "›", 15f, Design.Color.INK_MUTED).apply {
             setPadding(Design.dp(ctx, Design.Space.S), 0, 0, 0)
         }
 
@@ -232,7 +232,7 @@ object SettingsRows {
     private fun toggleView(ctx: Context, checked: Boolean): Pair<FrameLayout, View> {
         val track = FrameLayout(ctx).apply {
             background = Design.roundedBg(
-                ctx, if (checked) Design.Color.PRIMARY else 0xFFD6DAE1.toInt(), 11f
+                ctx, if (checked) Design.Color.PRIMARY else Design.Color.TOGGLE_OFF, 11f
             )
         }
         val knobSize = Design.dp(ctx, 18f)
@@ -250,7 +250,7 @@ object SettingsRows {
 
     private fun applyToggle(track: FrameLayout, knob: View, checked: Boolean) {
         (track.background as? GradientDrawable)?.setColor(
-            if (checked) Design.Color.PRIMARY else 0xFFD6DAE1.toInt()
+            if (checked) Design.Color.PRIMARY else Design.Color.TOGGLE_OFF
         )
         (knob.layoutParams as FrameLayout.LayoutParams).gravity =
             if (checked) Gravity.END or Gravity.CENTER_VERTICAL
