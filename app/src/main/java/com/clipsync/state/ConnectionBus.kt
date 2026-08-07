@@ -28,6 +28,15 @@ object ConnectionBus {
     var failureReason: String? = null
         private set
 
+    /**
+     * 是否因密码被管理端重置/封禁而被踢下线。
+     * 为 true 时 UI 显示「修改密码」按钮，不自动重连。
+     * 用户修改密码后调 [clearKicked] 清除。
+     */
+    @Volatile
+    var kicked: Boolean = false
+        private set
+
     private val listeners = mutableListOf<(String) -> Unit>()
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -38,11 +47,31 @@ object ConnectionBus {
     fun publish(state: String, reason: String? = null) {
         current = state
         failureReason = if (state == STATE_CLOSED) reason else null
+        // 进入连接中/已连接时清除踢下线标记
+        if (state != STATE_CLOSED) kicked = false
         val snapshot: List<(String) -> Unit>
         synchronized(listeners) { snapshot = listeners.toList() }
         mainHandler.post {
             snapshot.forEach { it(state) }
         }
+    }
+
+    /** 标记被踢下线（密码重置/封禁），UI 据此显示修改密码按钮 */
+    fun publishKicked(reason: String? = null) {
+        current = STATE_CLOSED
+        failureReason = reason
+        kicked = true
+        val snapshot: List<(String) -> Unit>
+        synchronized(listeners) { snapshot = listeners.toList() }
+        mainHandler.post {
+            snapshot.forEach { it(STATE_CLOSED) }
+        }
+    }
+
+    /** 用户修改密码后清除踢下线标记 */
+    fun clearKicked() {
+        kicked = false
+        failureReason = null
     }
 
     fun addListener(l: (String) -> Unit) {

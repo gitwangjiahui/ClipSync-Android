@@ -15,6 +15,8 @@ object MessageType {
     const val NOTIFY_ALL = "notify_all"
     /** 剪贴板同步（广播；接收方按开关决定是否自动写入本机剪贴板） */
     const val CLIPBOARD = "clipboard"
+    /** 服务端踢下线通知（密码重置/封禁） */
+    const val SERVER_KICK = "server_kick"
 }
 
 /**

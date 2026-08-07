@@ -353,7 +353,19 @@ class SyncService : Service() {
                 val fresh = when (val r = AuthClient.ensureToken(this@SyncService, server)) {
                     is AuthClient.TokenResult.Ok -> r.token
                     is AuthClient.TokenResult.Rejected -> {
-                        stopWithReason("登录失败：${r.reason}，请到设置里检查用户名和密码")
+                        // 密码被改 → 标记 kicked，让 UI 显示修改密码按钮
+                        val reason = r.reason
+                        if (reason.contains("密码") || reason.contains("password") ||
+                            reason.contains("用户名或密码")
+                        ) {
+                            ws?.kickStop = true
+                            ws?.stop()
+                            ws = null
+                            currentWs = null
+                            ConnectionBus.publishKicked("密码已失效，请修改密码后重新连接")
+                        } else {
+                            stopWithReason("登录失败：$reason，请到设置里检查用户名和密码")
+                        }
                         return@collect
                     }
                     is AuthClient.TokenResult.Unreachable -> {
@@ -447,6 +459,12 @@ class SyncService : Service() {
         incomingJob?.cancel()
         incomingJob = serviceScope.launch {
             wsClient.incoming.collect { msg ->
+                // 服务端踢下线通知：停止重连，提示用户修改密码
+                if (msg.type == MessageType.SERVER_KICK) {
+                    Log.w("ClipSync", "👢 收到服务端踢下线通知")
+                    handleServerKick()
+                    return@collect
+                }
                 // Mac 端可能会用 clipboard / clipboard_text / clipboard_image 三种 type
                 val isClipboardMsg = msg.type == MessageType.CLIPBOARD ||
                     msg.type.startsWith("clipboard")
@@ -559,6 +577,21 @@ class SyncService : Service() {
                 ts = msg.ts
             )
         )
+    }
+
+    /**
+     * 收到服务端踢下线通知：停止 WS 重连，清除本地 token，
+     * 标记 kicked 让 UI 显示修改密码按钮。
+     */
+    private fun handleServerKick() {
+        ws?.kickStop = true
+        ws?.stop()
+        ws = null
+        currentWs = null
+        AuthClient.clearSession(this)
+        ConnectionBus.publishKicked("密码已被管理员重置，请修改密码后重新连接")
+        val nm = getSystemService(NotificationManager::class.java)
+        nm?.notify(NOTIFICATION_ID, buildNotification(ConnectionBus.STATE_CLOSED))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

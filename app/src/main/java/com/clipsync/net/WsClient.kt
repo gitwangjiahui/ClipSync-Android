@@ -100,6 +100,10 @@ class WsClient(
     @Volatile
     private var kickRequested = false
 
+    /** 被服务端踢下线后置 true，阻止自动重连 */
+    @Volatile
+    var kickStop = false
+
     fun kick() {
         kickRequested = true
     }
@@ -108,7 +112,7 @@ class WsClient(
         // 断线自动重连：2s 起步指数退避，封顶 30s；连上后重置退避。
         // stop() 时 running=false 退出循环。
         var backoff = 2_000L
-        while (running) {
+        while (running && !kickStop) {
             try {
                 connectOnce()
                 backoff = 2_000L

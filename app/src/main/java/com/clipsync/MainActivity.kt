@@ -44,7 +44,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var statusHint: TextView
     private lateinit var toggleBtn: Button
-    private lateinit var targetText: TextView
+    private lateinit var changePwdBtn: Button
+    /** 当前服务器地址，供 renderState 拼接到状态提示里 */
+    private var serverAddr: String = ""
 
     // 剪贴板预览
     private lateinit var clipPreviewText: TextView
@@ -362,40 +364,32 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = Design.dp(this@MainActivity, 14f) })
 
-        // 分隔线 + 服务器脚注：地址是配置不是状态，降级处理
-        card.addView(Design.divider(this, Design.Color.BORDER_LIGHT), LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            Design.dp(this, 1f).coerceAtLeast(1)
-        ).apply { topMargin = Design.dp(this@MainActivity, 15f) })
-
-        val targetRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        // 修改密码按钮：仅在被踢下线时显示，和 toggleBtn 同样的描边样式
+        changePwdBtn = Button(this).apply {
+            text = "修改密码"
+            setTextColor(Design.Color.DANGER)
+            background = Design.outlinedBg(
+                this@MainActivity,
+                Design.Color.SURFACE,
+                Design.Color.DANGER_TINT,
+                Design.Radius.CHIP
+            )
+            textSize = Design.Text.BODY
+            setTypeface(typeface, android.graphics.Typeface.NORMAL)
+            stateListAnimator = null
+            val h = Design.dp(this@MainActivity, 22f)
+            val v = Design.dp(this@MainActivity, 9f)
+            setPadding(h, v, h, v)
+            visibility = View.GONE
+            setOnClickListener { showChangePasswordDialog() }
         }
-        targetRow.addView(
-            Design.text(this, "服务器", Design.Text.TAG, Design.Color.INK_MUTED)
-        )
-        targetText = Design.text(
-            this, "", Design.Text.MICRO, Design.Color.INK_SECONDARY, mono = true
-        ).apply {
-            maxLines = 1
-            setPadding(Design.dp(this@MainActivity, 7f), 0, 0, 0)
-        }
-        targetRow.addView(targetText, LinearLayout.LayoutParams(
-            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
-        ))
-        targetRow.addView(
-            Design.text(this, "更改", Design.Text.MICRO, Design.Color.PRIMARY).apply {
-                isClickable = true
-                setOnClickListener {
-                    startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
-                }
-            }
-        )
-        card.addView(targetRow, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
+        card.addView(changePwdBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = Design.dp(this@MainActivity, Design.Space.M) })
+        ).apply {
+            topMargin = Design.dp(this@MainActivity, Design.Space.S)
+            gravity = Gravity.CENTER_HORIZONTAL
+        })
 
         renderTarget()
         return card
@@ -530,6 +524,11 @@ class MainActivity : AppCompatActivity() {
         ) {
             return
         }
+        // 被踢下线时显示修改密码按钮
+        val kicked = ConnectionBus.kicked
+        if (::changePwdBtn.isInitialized) {
+            changePwdBtn.visibility = if (kicked) View.VISIBLE else View.GONE
+        }
         when (state) {
             ConnectionBus.STATE_OPEN -> {
                 stopDotAnimation()
@@ -539,7 +538,7 @@ class MainActivity : AppCompatActivity() {
                     Design.Color.SUCCESS
                 )
                 statusText.text = "已连接"
-                statusHint.text = "同步中，可正常收发内容"
+                statusHint.text = serverAddr
                 statusHint.setTextColor(Design.Color.INK_MUTED)
                 toggleBtn.text = "停止同步"
                 toggleBtn.isEnabled = true
@@ -555,7 +554,7 @@ class MainActivity : AppCompatActivity() {
                     Design.Color.WARNING
                 )
                 statusText.text = "连接中"
-                statusHint.text = "正在连接服务器…"
+                statusHint.text = serverAddr
                 statusHint.setTextColor(Design.Color.INK_MUTED)
                 toggleBtn.text = "取消连接"
                 toggleBtn.isEnabled = true
@@ -563,6 +562,22 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             else -> {
+                // 被踢下线：固定显示原因，不自动重连，引导用户改密码
+                if (kicked) {
+                    stopDotAnimation()
+                    applyRingColors(
+                        Design.Color.NEUTRAL_TINT_SOFT,
+                        Design.Color.DANGER_TINT,
+                        Design.Color.DANGER
+                    )
+                    statusText.text = "已下线"
+                    statusHint.text = ConnectionBus.failureReason ?: "密码已失效，请修改密码"
+                    statusHint.setTextColor(Design.Color.DANGER)
+                    toggleBtn.text = "启动同步"
+                    toggleBtn.isEnabled = true
+                    lastWasConnecting = false
+                    return
+                }
                 // 服务还活着 = 只是瞬时断线，内部在自动重连，不报失败。
                 // 但已经有明确失败原因时（账密不对 / 网络不通）就别再假装在重连了。
                 val reason = ConnectionBus.failureReason
@@ -575,7 +590,7 @@ class MainActivity : AppCompatActivity() {
                         Design.Color.WARNING
                     )
                     statusText.text = "重连中"
-                    statusHint.text = "连接中断，正在自动重连…"
+                    statusHint.text = serverAddr
                     statusHint.setTextColor(Design.Color.INK_MUTED)
                     toggleBtn.text = "取消连接"
                 } else {
@@ -586,11 +601,10 @@ class MainActivity : AppCompatActivity() {
                         Design.Color.NEUTRAL
                     )
                     statusText.text = "未连接"
-                    // 优先展示服务端 / 网络层给出的具体原因，笼统提示只作兜底
+                    // 优先展示服务端 / 网络层给出的具体原因，否则显示服务器地址
                     statusHint.text = when {
                         reason != null -> reason
-                        lastWasConnecting -> "连接失败，请检查网络或服务器后重试"
-                        else -> "点「启动同步」开始"
+                        else -> serverAddr
                     }
                     statusHint.setTextColor(
                         if (reason != null) Design.Color.DANGER else Design.Color.INK_MUTED
@@ -606,11 +620,9 @@ class MainActivity : AppCompatActivity() {
     private fun renderTarget() {
         val sp = getSharedPreferences("clipsync", MODE_PRIVATE)
         val raw = sp.getString("server", null) ?: com.clipsync.BuildConfig.DEFAULT_SERVER
-        // 展示规范化后的完整地址，让用户看到程序实际连的是哪里（ws:// 是自动补的）
-        val server = com.clipsync.net.ServerAddress.normalize(raw).ifEmpty { "未填写服务器地址" }
-        // 账号密码没填就连不上；token 由连接时自动换取，不需要用户关心
-        val tip = if (com.clipsync.net.AuthClient.hasCredentials(this)) "" else "  ·  未填账号密码"
-        targetText.text = "$server$tip"
+        serverAddr = com.clipsync.net.ServerAddress.normalize(raw).ifEmpty { "未填写服务器地址" }
+        // 地址变了就刷新状态提示
+        renderState(ConnectionBus.current)
     }
 
     // MARK: - 剪贴板预览（修复图片显示）
@@ -826,6 +838,8 @@ class MainActivity : AppCompatActivity() {
         if (isSyncServiceRunning()) {
             stopSync()
         } else {
+            // 用户手动启动时清除踢下线标记
+            ConnectionBus.clearKicked()
             renderState(ConnectionBus.STATE_CONNECTING)
             startSync()
         }
@@ -840,6 +854,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun isSyncServiceRunning(): Boolean {
         if (ConnectionBus.failureReason != null) return false
+        if (ConnectionBus.kicked) return false
         return SyncService.activeWs() != null ||
             ConnectionBus.current == ConnectionBus.STATE_CONNECTING ||
             ConnectionBus.current == ConnectionBus.STATE_OPEN
@@ -871,6 +886,8 @@ class MainActivity : AppCompatActivity() {
         val sp = getSharedPreferences("clipsync", MODE_PRIVATE)
         if (!sp.getBoolean("auto_connect", true)) return
         if (isSyncServiceRunning()) return
+        // 被踢下线后不自动重连，等用户改密码
+        if (ConnectionBus.kicked) return
         // 上次已经明确失败过（比如密码错了）就别再自动重试，让用户先去改设置
         if (ConnectionBus.failureReason != null) return
         renderState(ConnectionBus.STATE_CONNECTING)
@@ -881,10 +898,50 @@ class MainActivity : AppCompatActivity() {
         // 同步未启用 → 后续短信直接丢弃，不会因为一条验证码又把服务拉起来
         SyncService.setUserEnabled(this, false)
         stopService(Intent(this, SyncService::class.java))
+        // 清掉本地 token：下次启动强制走账号密码登录，
+        // 避免后端改了密码但旧 token 还能用的情况
+        com.clipsync.net.AuthClient.clearSession(this)
         // 主动停止不是"失败"，把上一次的错误原因清掉，别让红字留在界面上
         ConnectionBus.publish(ConnectionBus.STATE_CLOSED, null)
         renderState(ConnectionBus.STATE_CLOSED)
         lastWasConnecting = false
+    }
+
+    /**
+     * 弹框修改密码：填完确定后保存新密码，清除 kicked 标记，自动重连。
+     */
+    private fun showChangePasswordDialog() {
+        val input = com.clipsync.ui.DesignDialog.input(
+            this, "请输入新密码", "",
+            android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        )
+        com.clipsync.ui.DesignDialog.show(
+            this, "修改密码", "密码已被管理员重置，请输入新密码后重新连接",
+            confirmLabel = "确定并重连",
+            body = { it.addView(input, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )) }
+        ) {
+            val newPwd = input.text.toString()
+            if (newPwd.isEmpty()) {
+                toast.show("请输入新密码", Design.Color.WARNING)
+                return@show
+            }
+            // 保存新密码，作废旧 token
+            com.clipsync.net.AuthClient.saveCredentials(
+                this,
+                com.clipsync.net.AuthClient.savedUsername(this),
+                newPwd
+            )
+            com.clipsync.net.AuthClient.clearSession(this)
+            // 清除踢下线标记，重新启动同步
+            ConnectionBus.clearKicked()
+            toast.show("密码已更新，正在重连…", Design.Color.SUCCESS)
+            renderState(ConnectionBus.STATE_CONNECTING)
+            startSync()
+        }
     }
 
     /**
